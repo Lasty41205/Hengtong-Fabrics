@@ -1,4 +1,30 @@
-import { OrderForm } from "./types";
+import { OrderForm, OrderItem } from "./types";
+
+export const logisticsOptions = ["圆通", "四季春", "京东", "其他"] as const;
+
+export const customerDirectory = {
+  恒通: {
+    phone: "18339931253",
+    address: "邯郸"
+  }
+} as const;
+
+export const productPriceLibrary: Record<string, string> = {
+  "860-12": "18",
+  "860-13": "14",
+  "180-13": "14"
+};
+
+export function createEmptyItem(): OrderItem {
+  return {
+    id: crypto.randomUUID(),
+    nameSpec: "",
+    quantity: "",
+    unitPrice: "",
+    amount: "",
+    issues: {}
+  };
+}
 
 export const createEmptyForm = (): OrderForm => ({
   customer: "",
@@ -6,49 +32,7 @@ export const createEmptyForm = (): OrderForm => ({
   address: "",
   logistics: "",
   remark: "",
-  items: [
-    {
-      id: crypto.randomUUID(),
-      nameSpec: "",
-      quantity: "",
-      unitPrice: "",
-      amount: "",
-      issues: {}
-    }
-  ],
+  items: [createEmptyItem()],
   totalAmount: "0",
-  issues: {}
-});
-
-export const createMockParsedOrder = (): OrderForm => ({
-  customer: "恒通",
-  phone: "18339931253",
-  address: "邯郸",
-  logistics: "四季春",
-  remark: "",
-  items: [
-    {
-      id: crypto.randomUUID(),
-      nameSpec: "860-12",
-      quantity: "20",
-      unitPrice: "18",
-      amount: "360",
-      issues: {}
-    },
-    {
-      id: crypto.randomUUID(),
-      nameSpec: "180-13",
-      quantity: "10",
-      unitPrice: "",
-      amount: "140",
-      issues: {
-        unitPrice: {
-          level: "missing",
-          message: "单价缺失，请手动补齐"
-        }
-      }
-    }
-  ],
-  totalAmount: "500",
   issues: {}
 });

@@ -1,13 +1,14 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { TopBar } from "../components/TopBar";
-import { createEmptyForm, createMockParsedOrder } from "../mockData";
+import { createEmptyForm, createEmptyItem, logisticsOptions } from "../mockData";
 import { OrderForm, OrderItem } from "../types";
 import {
   calculateAmount,
   calculateTotalAmount,
   collectValidationIssues,
-  getInputIssue
+  getInputIssue,
+  parseLocalOrderInput
 } from "../utils";
 
 const fieldTips = {
@@ -17,25 +18,54 @@ const fieldTips = {
   logistics: "物流不能为空"
 } as const;
 
-function createEmptyItem(): OrderItem {
-  return {
-    id: crypto.randomUUID(),
-    nameSpec: "",
-    quantity: "",
-    unitPrice: "",
-    amount: "",
-    issues: {}
-  };
-}
+const presetLogisticsOptions = logisticsOptions.filter((item) => item !== "其他");
+
+type FocusableElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+
+type PastedImage = {
+  file: File;
+  url: string;
+};
 
 export function OrderEditorPage() {
   const navigate = useNavigate();
+  const editorSectionRef = useRef<HTMLElement | null>(null);
+  const fieldRefs = useRef<Record<string, FocusableElement | null>>({});
   const [rawInput, setRawInput] = useState("");
   const [form, setForm] = useState<OrderForm>(createEmptyForm);
   const [hasParsed, setHasParsed] = useState(false);
-  const [hint, setHint] = useState("当前为本地 mock 版本，未接真实 AI。");
+  const [hint, setHint] = useState("当前为本地规则解析版本，未接真实 AI。物流需手动选择。");
+  const [useCustomLogistics, setUseCustomLogistics] = useState(false);
+  const [activeFieldKey, setActiveFieldKey] = useState("");
+  const [pastedImage, setPastedImage] = useState<PastedImage | null>(null);
 
   const invalidCount = useMemo(() => collectValidationIssues(form).length, [form]);
+
+  useEffect(() => {
+    return () => {
+      if (pastedImage?.url) {
+        URL.revokeObjectURL(pastedImage.url);
+      }
+    };
+  }, [pastedImage]);
+
+  const registerFieldRef = (key: string) => (node: FocusableElement | null) => {
+    fieldRefs.current[key] = node;
+  };
+
+  const replacePastedImage = (file: File) => {
+    setPastedImage((current) => {
+      if (current?.url) {
+        URL.revokeObjectURL(current.url);
+      }
+
+      return {
+        file,
+        url: URL.createObjectURL(file)
+      };
+    });
+    setHint("已粘贴图片，本轮先展示预览，后续再接 OCR。物流需手动选择。");
+  };
 
   const updateFormField = (key: keyof OrderForm, value: string) => {
     setForm((current) => ({
@@ -83,20 +113,59 @@ export function OrderEditorPage() {
     });
   };
 
-  const handleParse = () => {
-    const mock = createMockParsedOrder();
-    setForm({
-      ...mock,
-      totalAmount: calculateTotalAmount(mock.items)
+  const scrollToEditorSection = () => {
+    editorSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const imageItem = Array.from(event.clipboardData.items).find((item) =>
+      item.type.startsWith("image/")
+    );
+
+    if (!imageItem) return;
+
+    const file = imageItem.getAsFile();
+    if (!file) return;
+
+    replacePastedImage(file);
+  };
+
+  const handleRemovePastedImage = () => {
+    setPastedImage((current) => {
+      if (current?.url) {
+        URL.revokeObjectURL(current.url);
+      }
+      return null;
     });
+    setHint("已移除粘贴图片。");
+  };
+
+  const handleParse = () => {
+    const parsed = parseLocalOrderInput(rawInput);
+    setForm(parsed.form);
     setHasParsed(true);
-    setHint("已填入本地 mock 解析结果，其中第 2 行单价故意缺失，用于测试异常定位。");
+    setUseCustomLogistics(false);
+    setHint(
+      pastedImage
+        ? `${parsed.summary} 已检测到粘贴图片，本轮暂不识别图片内容。`
+        : parsed.summary
+    );
+    setActiveFieldKey("");
+    window.setTimeout(scrollToEditorSection, 120);
   };
 
   const handleClear = () => {
     setRawInput("");
     setForm(createEmptyForm());
     setHasParsed(false);
+    setUseCustomLogistics(false);
+    setActiveFieldKey("");
+    setPastedImage((current) => {
+      if (current?.url) {
+        URL.revokeObjectURL(current.url);
+      }
+      return null;
+    });
     setHint("内容已清空。");
   };
 
@@ -124,26 +193,49 @@ export function OrderEditorPage() {
     });
   };
 
-  const scrollToFirstInvalid = () => {
-    const target = document.querySelector<HTMLElement>("[data-invalid='true']");
+  const handleLogisticsSelectChange = (value: string) => {
+    if (value === "其他") {
+      setUseCustomLogistics(true);
+      updateFormField("logistics", "");
+      return;
+    }
+
+    setUseCustomLogistics(false);
+    updateFormField("logistics", value);
+  };
+
+  const scrollToIssueField = (fieldKey: string) => {
+    const target = fieldRefs.current[fieldKey];
     if (!target) return;
 
+    setActiveFieldKey(fieldKey);
     target.scrollIntoView({ behavior: "smooth", block: "center" });
-    target.focus();
+    window.setTimeout(() => {
+      target.focus({ preventScroll: true });
+    }, 160);
+    window.setTimeout(() => {
+      setActiveFieldKey((current) => (current === fieldKey ? "" : current));
+    }, 1400);
   };
 
   const handleGenerate = () => {
     const issues = collectValidationIssues(form);
 
     if (issues.length > 0) {
+      setHasParsed(true);
       setHint(issues[0].message);
-      window.setTimeout(scrollToFirstInvalid, 80);
+      window.setTimeout(() => scrollToIssueField(issues[0].key), 120);
       return;
     }
 
     sessionStorage.setItem("invoice-preview-order", JSON.stringify(form));
     navigate("/preview", { state: { order: form } });
   };
+
+  const customerIssue = getInputIssue(form.issues.customer, form.customer, fieldTips.customer);
+  const phoneIssue = getInputIssue(form.issues.phone, form.phone, fieldTips.phone);
+  const addressIssue = getInputIssue(form.issues.address, form.address, fieldTips.address);
+  const logisticsIssue = getInputIssue(form.issues.logistics, form.logistics, fieldTips.logistics);
 
   return (
     <main className="page-shell">
@@ -152,10 +244,7 @@ export function OrderEditorPage() {
 
         <section className="hero-card">
           <div className="hero-card__heading">
-            <div>
-              <h2>快速录入报单</h2>
-              <p>首页直接输入，解析后在同页编辑，不额外跳步骤。</p>
-            </div>
+            <h2>快速录入报单</h2>
             <span className="status-chip">移动端优先</span>
           </div>
 
@@ -164,12 +253,20 @@ export function OrderEditorPage() {
             placeholder="请输入报单内容"
             value={rawInput}
             onChange={(event) => setRawInput(event.target.value)}
+            onPaste={handlePaste}
           />
 
-          <div className="hero-tools">
-            <span className="ghost-chip">语音输入（占位）</span>
-            <span className="ghost-chip">支持图片粘贴入口提示</span>
-          </div>
+          {pastedImage ? (
+            <div className="pasted-image-card">
+              <div className="pasted-image-card__head">
+                <span>已粘贴图片</span>
+                <button className="ghost-button pasted-image-card__remove" type="button" onClick={handleRemovePastedImage}>
+                  删除图片
+                </button>
+              </div>
+              <img className="pasted-image-preview" src={pastedImage.url} alt="已粘贴图片预览" />
+            </div>
+          ) : null}
 
           <div className="action-row">
             <button className="secondary-button" type="button" onClick={handleParse}>
@@ -182,41 +279,92 @@ export function OrderEditorPage() {
         </section>
 
         {hasParsed ? (
-          <section className="editor-card">
+          <section className="editor-card" ref={editorSectionRef}>
             <div className="section-title-row">
-              <div>
-                <h2>销货单编辑区</h2>
-                <p>异常字段统一浅红底高亮，生成前自动定位第一个异常。</p>
-              </div>
+              <h2>销货单编辑区</h2>
               <span className={invalidCount > 0 ? "danger-chip" : "success-chip"}>
                 {invalidCount > 0 ? `待处理 ${invalidCount} 项` : "可生成"}
               </span>
             </div>
 
             <div className="field-grid">
-              {(
-                [
-                  ["customer", "客户"],
-                  ["phone", "电话"],
-                  ["address", "地址"],
-                  ["logistics", "物流"]
-                ] as const
-              ).map(([key, label]) => {
-                const issue = getInputIssue(form.issues[key], form[key], fieldTips[key]);
+              <label className="field-block">
+                <span className="field-label">客户</span>
+                <input
+                  ref={registerFieldRef("customer")}
+                  className={`field-input ${customerIssue ? "is-invalid" : ""} ${
+                    activeFieldKey === "customer" ? "field-attention" : ""
+                  }`}
+                  data-invalid={customerIssue ? "true" : "false"}
+                  value={form.customer}
+                  onChange={(event) => updateFormField("customer", event.target.value)}
+                />
+                {customerIssue ? <span className="field-error">{customerIssue.message}</span> : null}
+              </label>
 
-                return (
-                  <label className="field-block" key={key}>
-                    <span className="field-label">{label}</span>
-                    <input
-                      className={`field-input ${issue ? "is-invalid" : ""}`}
-                      data-invalid={issue ? "true" : "false"}
-                      value={form[key]}
-                      onChange={(event) => updateFormField(key, event.target.value)}
-                    />
-                    {issue ? <span className="field-error">{issue.message}</span> : null}
-                  </label>
-                );
-              })}
+              <label className="field-block">
+                <span className="field-label">电话</span>
+                <input
+                  ref={registerFieldRef("phone")}
+                  className={`field-input ${phoneIssue ? "is-invalid" : ""} ${
+                    activeFieldKey === "phone" ? "field-attention" : ""
+                  }`}
+                  data-invalid={phoneIssue ? "true" : "false"}
+                  value={form.phone}
+                  onChange={(event) => updateFormField("phone", event.target.value)}
+                />
+                {phoneIssue ? <span className="field-error">{phoneIssue.message}</span> : null}
+              </label>
+
+              <label className="field-block">
+                <span className="field-label">地址</span>
+                <input
+                  ref={registerFieldRef("address")}
+                  className={`field-input ${addressIssue ? "is-invalid" : ""} ${
+                    activeFieldKey === "address" ? "field-attention" : ""
+                  }`}
+                  data-invalid={addressIssue ? "true" : "false"}
+                  value={form.address}
+                  onChange={(event) => updateFormField("address", event.target.value)}
+                />
+                {addressIssue ? <span className="field-error">{addressIssue.message}</span> : null}
+              </label>
+
+              <div className="field-block">
+                <span className="field-label">物流</span>
+                <select
+                  ref={useCustomLogistics ? undefined : registerFieldRef("logistics")}
+                  className={`field-input field-select ${logisticsIssue ? "is-invalid" : ""} ${
+                    activeFieldKey === "logistics" && !useCustomLogistics ? "field-attention" : ""
+                  }`}
+                  data-invalid={logisticsIssue ? "true" : "false"}
+                  value={useCustomLogistics ? "其他" : form.logistics}
+                  onChange={(event) => handleLogisticsSelectChange(event.target.value)}
+                >
+                  <option value="">请选择物流</option>
+                  {presetLogisticsOptions.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                  <option value="其他">其他</option>
+                </select>
+
+                {useCustomLogistics ? (
+                  <input
+                    ref={registerFieldRef("logistics")}
+                    className={`field-input field-input--sub ${logisticsIssue ? "is-invalid" : ""} ${
+                      activeFieldKey === "logistics" ? "field-attention" : ""
+                    }`}
+                    data-invalid={logisticsIssue ? "true" : "false"}
+                    placeholder="请输入物流名称"
+                    value={form.logistics}
+                    onChange={(event) => updateFormField("logistics", event.target.value)}
+                  />
+                ) : null}
+
+                {logisticsIssue ? <span className="field-error">{logisticsIssue.message}</span> : null}
+              </div>
 
               <label className="field-block field-block--full">
                 <span className="field-label">备注（可选）</span>
@@ -231,10 +379,7 @@ export function OrderEditorPage() {
 
             <div className="items-panel">
               <div className="section-title-row">
-                <div>
-                  <h3>商品明细</h3>
-                  <p>局部吸收 POS 风格，信息更紧凑，录单更直接。</p>
-                </div>
+                <h3>商品明细</h3>
                 <button className="inline-button" type="button" onClick={handleAddItem}>
                   添加一行
                 </button>
@@ -262,7 +407,10 @@ export function OrderEditorPage() {
 
                       <div className="item-cell item-cell--name">
                         <input
-                          className={`table-input ${nameIssue ? "is-invalid" : ""}`}
+                          ref={registerFieldRef(`item-${item.id}-nameSpec`)}
+                          className={`table-input ${nameIssue ? "is-invalid" : ""} ${
+                            activeFieldKey === `item-${item.id}-nameSpec` ? "field-attention" : ""
+                          }`}
                           data-invalid={nameIssue ? "true" : "false"}
                           placeholder="名称及规格"
                           value={item.nameSpec}
@@ -273,7 +421,10 @@ export function OrderEditorPage() {
 
                       <div className="item-cell">
                         <input
-                          className={`table-input ${quantityIssue ? "is-invalid" : ""}`}
+                          ref={registerFieldRef(`item-${item.id}-quantity`)}
+                          className={`table-input ${quantityIssue ? "is-invalid" : ""} ${
+                            activeFieldKey === `item-${item.id}-quantity` ? "field-attention" : ""
+                          }`}
                           data-invalid={quantityIssue ? "true" : "false"}
                           inputMode="decimal"
                           placeholder="数量"
@@ -285,7 +436,10 @@ export function OrderEditorPage() {
 
                       <div className="item-cell">
                         <input
-                          className={`table-input ${priceIssue ? "is-invalid" : ""}`}
+                          ref={registerFieldRef(`item-${item.id}-unitPrice`)}
+                          className={`table-input ${priceIssue ? "is-invalid" : ""} ${
+                            activeFieldKey === `item-${item.id}-unitPrice` ? "field-attention" : ""
+                          }`}
                           data-invalid={priceIssue ? "true" : "false"}
                           inputMode="decimal"
                           placeholder="单价"
@@ -297,7 +451,10 @@ export function OrderEditorPage() {
 
                       <div className="item-cell">
                         <input
-                          className={`table-input table-input--readonly ${amountIssue ? "is-invalid" : ""}`}
+                          ref={registerFieldRef(`item-${item.id}-amount`)}
+                          className={`table-input table-input--readonly ${amountIssue ? "is-invalid" : ""} ${
+                            activeFieldKey === `item-${item.id}-amount` ? "field-attention" : ""
+                          }`}
                           data-invalid={amountIssue ? "true" : "false"}
                           placeholder="金额"
                           value={item.amount}
@@ -329,7 +486,6 @@ export function OrderEditorPage() {
         ) : (
           <section className="empty-card">
             <h2>等待解析</h2>
-            <p>点击“AI解析”后，用本地 mock 数据模拟填充表单。</p>
           </section>
         )}
 

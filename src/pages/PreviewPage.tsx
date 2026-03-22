@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { toPng } from "html-to-image";
 import { useLocation, useNavigate } from "react-router-dom";
 import { TopBar } from "../components/TopBar";
 import { OrderForm } from "../types";
@@ -14,7 +15,10 @@ const today = new Intl.DateTimeFormat("zh-CN", {
 export function PreviewPage() {
   const navigate = useNavigate();
   const location = useLocation();
+  const sheetRef = useRef<HTMLDivElement | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [downloadHint, setDownloadHint] = useState("点击模板右上角菜单，可下载 PNG 图片。");
+  const [isExporting, setIsExporting] = useState(false);
 
   const order = useMemo<OrderForm | null>(() => {
     const routeState = location.state as { order?: OrderForm } | null;
@@ -37,7 +41,7 @@ export function PreviewPage() {
     return [...items, ...blanks].slice(0, FIXED_ROWS);
   }, [order]);
 
-  const handleCopy = async () => {
+  const handleCopyText = async () => {
     if (!order) return;
 
     const text = [
@@ -55,28 +59,41 @@ export function PreviewPage() {
     ].join("\n");
 
     await navigator.clipboard.writeText(text);
+    setDownloadHint("已复制销货单文字内容。复制图片到剪贴板本轮先不做，后续再接。");
     setMenuOpen(false);
   };
 
-  const handleDownload = () => {
-    if (!order) return;
+  const handleDownloadImage = async () => {
+    if (!sheetRef.current || !order) return;
 
-    const blob = new Blob(
-      [JSON.stringify({ title: "销货单", date: today, order }, null, 2)],
-      { type: "application/json;charset=utf-8" }
-    );
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `销货单-${today}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-    setMenuOpen(false);
+    try {
+      setIsExporting(true);
+      setDownloadHint("正在导出 PNG 图片...");
+
+      const dataUrl = await toPng(sheetRef.current, {
+        cacheBust: true,
+        pixelRatio: 2,
+        backgroundColor: "#ffffff"
+      });
+
+      const link = document.createElement("a");
+      link.href = dataUrl;
+      link.download = `销货单-${today}.png`;
+      link.click();
+
+      setDownloadHint("PNG 图片已开始下载。");
+      setMenuOpen(false);
+    } catch (error) {
+      console.error(error);
+      setDownloadHint("图片导出失败，请稍后重试。");
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   if (!order) {
     return (
-      <main className="page-shell">
+      <main className="page-shell page-shell--preview">
         <div className="page phone-frame">
           <TopBar title="销货单预览" />
           <section className="empty-card empty-card--preview">
@@ -92,7 +109,7 @@ export function PreviewPage() {
   }
 
   return (
-    <main className="page-shell">
+    <main className="page-shell page-shell--preview">
       <div className="page phone-frame">
         <TopBar title="销货单预览" rightText="固定模板" />
 
@@ -100,7 +117,7 @@ export function PreviewPage() {
           <div className="preview-card__head">
             <div>
               <h2>正式销货单预览</h2>
-              <p>点击预览区域弹出菜单，这是本轮替代长按图片菜单的降级方案。</p>
+              <p>{downloadHint}</p>
             </div>
             <button className="ghost-button" type="button" onClick={() => navigate("/")}>
               返回编辑
@@ -108,7 +125,7 @@ export function PreviewPage() {
           </div>
 
           <div className="preview-wrapper">
-            <button className="preview-sheet" type="button" onClick={() => setMenuOpen((v) => !v)}>
+            <div className="preview-sheet" ref={sheetRef}>
               <div className="sheet-header">
                 <div>
                   <p className="sheet-caption">AI销货单助手</p>
@@ -164,16 +181,35 @@ export function PreviewPage() {
                   <strong>¥ {order.totalAmount}</strong>
                 </div>
               </div>
-            </button>
+            </div>
+
+            <div className="preview-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => setMenuOpen((v) => !v)}
+              >
+                更多操作
+              </button>
+              <button
+                className="primary-button preview-download-button"
+                type="button"
+                onClick={handleDownloadImage}
+                disabled={isExporting}
+              >
+                {isExporting ? "导出中..." : "下载 PNG"}
+              </button>
+            </div>
 
             {menuOpen ? (
               <div className="preview-menu">
-                <button type="button" onClick={handleCopy}>
-                  复制
+                <button type="button" onClick={handleCopyText}>
+                  复制文字
                 </button>
-                <button type="button" onClick={handleDownload}>
-                  下载
+                <button type="button" onClick={handleDownloadImage}>
+                  下载图片
                 </button>
+                <p className="preview-menu__note">复制图片到剪贴板本轮先保留为后续能力。</p>
               </div>
             ) : null}
           </div>
