@@ -19,6 +19,7 @@ const fieldTips = {
 } as const;
 
 const presetLogisticsOptions = logisticsOptions.filter((item) => item !== "其他");
+const EDITOR_STATE_KEY = "invoice-editor-state";
 
 type FocusableElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
 
@@ -27,19 +28,66 @@ type PastedImage = {
   url: string;
 };
 
+type EditorSnapshot = {
+  rawInput: string;
+  form: OrderForm;
+  hasParsed: boolean;
+  useCustomLogistics: boolean;
+  hint: string;
+};
+
+function loadEditorSnapshot(): EditorSnapshot {
+  const defaultState = {
+    rawInput: "",
+    form: createEmptyForm(),
+    hasParsed: false,
+    useCustomLogistics: false,
+    hint: "当前为本地规则解析版本，未接真实 AI。物流需手动选择。"
+  };
+
+  try {
+    const saved = sessionStorage.getItem(EDITOR_STATE_KEY);
+    if (!saved) return defaultState;
+
+    const parsed = JSON.parse(saved) as Partial<EditorSnapshot>;
+    return {
+      rawInput: parsed.rawInput ?? defaultState.rawInput,
+      form: parsed.form ?? defaultState.form,
+      hasParsed: parsed.hasParsed ?? defaultState.hasParsed,
+      useCustomLogistics: parsed.useCustomLogistics ?? defaultState.useCustomLogistics,
+      hint: parsed.hint ?? defaultState.hint
+    };
+  } catch {
+    return defaultState;
+  }
+}
+
 export function OrderEditorPage() {
   const navigate = useNavigate();
   const editorSectionRef = useRef<HTMLElement | null>(null);
   const fieldRefs = useRef<Record<string, FocusableElement | null>>({});
-  const [rawInput, setRawInput] = useState("");
-  const [form, setForm] = useState<OrderForm>(createEmptyForm);
-  const [hasParsed, setHasParsed] = useState(false);
-  const [hint, setHint] = useState("当前为本地规则解析版本，未接真实 AI。物流需手动选择。");
-  const [useCustomLogistics, setUseCustomLogistics] = useState(false);
+  const initialState = useMemo(loadEditorSnapshot, []);
+  const [rawInput, setRawInput] = useState(initialState.rawInput);
+  const [form, setForm] = useState<OrderForm>(initialState.form);
+  const [hasParsed, setHasParsed] = useState(initialState.hasParsed);
+  const [hint, setHint] = useState(initialState.hint);
+  const [useCustomLogistics, setUseCustomLogistics] = useState(initialState.useCustomLogistics);
   const [activeFieldKey, setActiveFieldKey] = useState("");
   const [pastedImage, setPastedImage] = useState<PastedImage | null>(null);
 
   const invalidCount = useMemo(() => collectValidationIssues(form).length, [form]);
+
+  useEffect(() => {
+    const snapshot: EditorSnapshot = {
+      rawInput,
+      form,
+      hasParsed,
+      useCustomLogistics,
+      hint
+    };
+
+    sessionStorage.setItem(EDITOR_STATE_KEY, JSON.stringify(snapshot));
+  }, [form, hasParsed, hint, rawInput, useCustomLogistics]);
 
   useEffect(() => {
     return () => {
@@ -167,6 +215,7 @@ export function OrderEditorPage() {
       return null;
     });
     setHint("内容已清空。");
+    sessionStorage.removeItem(EDITOR_STATE_KEY);
   };
 
   const handleAddItem = () => {
@@ -228,6 +277,15 @@ export function OrderEditorPage() {
       return;
     }
 
+    const snapshot: EditorSnapshot = {
+      rawInput,
+      form,
+      hasParsed: true,
+      useCustomLogistics,
+      hint
+    };
+
+    sessionStorage.setItem(EDITOR_STATE_KEY, JSON.stringify(snapshot));
     sessionStorage.setItem("invoice-preview-order", JSON.stringify(form));
     navigate("/preview", { state: { order: form } });
   };
@@ -385,7 +443,7 @@ export function OrderEditorPage() {
                 </button>
               </div>
 
-              <div className="items-header">
+              <div className="items-header items-header--compact">
                 <span />
                 <span>名称及规格</span>
                 <span>数量</span>
@@ -402,7 +460,7 @@ export function OrderEditorPage() {
                   const amountIssue = getInputIssue(item.issues.amount, item.amount, "金额将自动计算");
 
                   return (
-                    <div className="item-row" key={item.id}>
+                    <div className="item-row item-row--compact" key={item.id}>
                       <div className="item-index">{index + 1}</div>
 
                       <div className="item-cell item-cell--name">
@@ -465,11 +523,15 @@ export function OrderEditorPage() {
 
                       <div className="item-cell item-cell--action">
                         <button
-                          className="delete-button"
+                          className="delete-button delete-button--icon"
                           type="button"
+                          aria-label="删除商品行"
+                          title="删除"
                           onClick={() => handleDeleteItem(item.id)}
                         >
-                          删除
+                          <span className="delete-button__icon" aria-hidden="true">
+                            ×
+                          </span>
                         </button>
                       </div>
                     </div>

@@ -1,32 +1,144 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toPng } from "html-to-image";
 import { useLocation, useNavigate } from "react-router-dom";
 import { TopBar } from "../components/TopBar";
-import { OrderForm } from "../types";
+import { OrderForm, OrderItem } from "../types";
 
 const FIXED_ROWS = 8;
+const qrImageUrl = new URL("../../二维码.jpg", import.meta.url).href;
+const PREVIEW_ORDER_KEY = "invoice-preview-order";
+const PREVIEW_IMAGE_KEY = "invoice-preview-image";
 
-const today = new Intl.DateTimeFormat("zh-CN", {
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit"
-}).format(new Date());
+const today = new Date();
+const yearText = String(today.getFullYear());
+const monthText = String(today.getMonth() + 1).padStart(2, "0");
+const dayText = String(today.getDate()).padStart(2, "0");
+const exportDateText = `${yearText}${monthText}${dayText}`;
+
+const companyInfo = {
+  title: "恒通布艺销货单",
+  address: "郑州市中牟县航海东路与蒋冲东街交叉口华丰家具材料城C馆东1-06号",
+  phone: "17193883393",
+  mobiles: ["13607668819", "13938225515"],
+  qrCaption: "扫码关注快捷查询样板",
+  business: "经营：各种高、中、低档沙发布、软硬包布、工程布、汽车座套布，批发各种高、中、低档汽车座套",
+  notice: "货物请当面点清，如有差错，请在收到货物的当天与我处核对。谢谢！"
+};
+
+type SheetRow = OrderItem | Pick<OrderItem, "id" | "nameSpec" | "quantity" | "unitPrice" | "amount">;
+
+type InvoiceSheetProps = {
+  order: OrderForm;
+  rows: SheetRow[];
+  className?: string;
+};
+
+function InvoiceSheet({ order, rows, className = "" }: InvoiceSheetProps) {
+  return (
+    <div className={`preview-sheet preview-sheet--invoice-simple ${className}`.trim()}>
+      <header className="invoice-simple-header">
+        <h1>{companyInfo.title}</h1>
+      </header>
+
+      <div className="invoice-simple-top">
+        <div className="invoice-simple-title-block">
+          <div className="invoice-simple-contact">
+            <p>
+              <strong>地址：</strong>
+              <span>{companyInfo.address}</span>
+            </p>
+            <p>
+              <strong>电话：</strong>
+              <span>{companyInfo.phone}</span>
+            </p>
+            <p>
+              <strong>手机：</strong>
+              <span>{companyInfo.mobiles[0]} {companyInfo.mobiles[1]}</span>
+            </p>
+          </div>
+        </div>
+
+        <div className="invoice-simple-qr-block">
+          <img className="invoice-simple-qr-photo" src={qrImageUrl} alt="恒通布艺二维码" />
+          <p>{companyInfo.qrCaption}</p>
+        </div>
+      </div>
+
+      <div className="sheet-meta sheet-meta--simple sheet-meta--focus">
+        <div>
+          <span>客户</span>
+          <strong>{order.customer}</strong>
+        </div>
+        <div>
+          <span>电话</span>
+          <strong>{order.phone}</strong>
+        </div>
+        <div>
+          <span>地址</span>
+          <strong>{order.address}</strong>
+        </div>
+        <div>
+          <span>日期</span>
+          <strong>{yearText}-{monthText}-{dayText}</strong>
+        </div>
+      </div>
+
+      <div className="sheet-table sheet-table--simple">
+        <div className="sheet-row sheet-row--head">
+          <span>名称及规格</span>
+          <span>数量</span>
+          <span>单价</span>
+          <span>金额</span>
+        </div>
+
+        {rows.map((item) => (
+          <div className="sheet-row sheet-row--value" key={item.id}>
+            <span>{item.nameSpec}</span>
+            <span>{item.quantity}</span>
+            <span>{item.unitPrice}</span>
+            <span>{item.amount}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="sheet-footer sheet-footer--simple sheet-footer--focus">
+        <div>
+          <span>备注</span>
+          <strong>{order.remark || "无"}</strong>
+        </div>
+        <div>
+          <span>合计金额</span>
+          <strong>¥ {order.totalAmount}</strong>
+        </div>
+      </div>
+
+      <div className="invoice-simple-bottom">
+        <p>{companyInfo.business}</p>
+        <p>{companyInfo.notice}</p>
+      </div>
+    </div>
+  );
+}
+
+function loadPreviewOrder(locationState: unknown): OrderForm | null {
+  const routeState = locationState as { order?: OrderForm } | null;
+  if (routeState?.order) return routeState.order;
+
+  const cache = sessionStorage.getItem(PREVIEW_ORDER_KEY);
+  return cache ? (JSON.parse(cache) as OrderForm) : null;
+}
 
 export function PreviewPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const sheetRef = useRef<HTMLDivElement | null>(null);
+  const exportFrameRef = useRef<HTMLDivElement | null>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const [imageUrl, setImageUrl] = useState<string>(() => sessionStorage.getItem(PREVIEW_IMAGE_KEY) ?? "");
   const [menuOpen, setMenuOpen] = useState(false);
-  const [downloadHint, setDownloadHint] = useState("点击模板右上角菜单，可下载 PNG 图片。");
-  const [isExporting, setIsExporting] = useState(false);
+  const [hint, setHint] = useState("长按图片可复制或下载。");
+  const [isPreparing, setIsPreparing] = useState(true);
 
-  const order = useMemo<OrderForm | null>(() => {
-    const routeState = location.state as { order?: OrderForm } | null;
-    if (routeState?.order) return routeState.order;
-
-    const cache = sessionStorage.getItem("invoice-preview-order");
-    return cache ? (JSON.parse(cache) as OrderForm) : null;
-  }, [location.state]);
+  const order = useMemo(() => loadPreviewOrder(location.state), [location.state]);
 
   const rows = useMemo(() => {
     const items = order?.items ?? [];
@@ -41,53 +153,130 @@ export function PreviewPage() {
     return [...items, ...blanks].slice(0, FIXED_ROWS);
   }, [order]);
 
-  const handleCopyText = async () => {
-    if (!order) return;
+  const buildImage = async () => {
+    if (!exportFrameRef.current || !order) return "";
 
-    const text = [
-      "AI销货单助手",
-      `日期：${today}`,
-      `客户：${order.customer}`,
-      `电话：${order.phone}`,
-      `地址：${order.address}`,
-      `物流：${order.logistics}`,
-      ...order.items.map(
-        (item, index) =>
-          `商品${index + 1}：${item.nameSpec} / ${item.quantity} / ${item.unitPrice} / ${item.amount}`
-      ),
-      `合计金额：${order.totalAmount}`
-    ].join("\n");
+    const target = exportFrameRef.current;
+    const dataUrl = await toPng(target, {
+      cacheBust: true,
+      pixelRatio: 2,
+      backgroundColor: "#ffffff",
+      width: target.offsetWidth,
+      height: target.offsetHeight,
+      canvasWidth: target.offsetWidth,
+      canvasHeight: target.offsetHeight,
+      style: {
+        margin: "0",
+        transform: "none",
+        maxWidth: "none",
+        overflow: "visible"
+      }
+    });
 
-    await navigator.clipboard.writeText(text);
-    setDownloadHint("已复制销货单文字内容。复制图片到剪贴板本轮先不做，后续再接。");
-    setMenuOpen(false);
+    sessionStorage.setItem(PREVIEW_IMAGE_KEY, dataUrl);
+    return dataUrl;
   };
 
-  const handleDownloadImage = async () => {
-    if (!sheetRef.current || !order) return;
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!order) {
+      setIsPreparing(false);
+      return undefined;
+    }
+
+    const timer = window.setTimeout(async () => {
+      try {
+        setIsPreparing(true);
+        const nextImageUrl = await buildImage();
+        if (!cancelled) {
+          setImageUrl(nextImageUrl);
+          setHint("长按图片可复制或下载。");
+        }
+      } catch (error) {
+        console.error(error);
+        if (!cancelled) {
+          setHint("图片生成失败，请返回编辑页重试。");
+        }
+      } finally {
+        if (!cancelled) {
+          setIsPreparing(false);
+        }
+      }
+    }, 80);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [order]);
+
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current) {
+        window.clearTimeout(longPressTimerRef.current);
+      }
+    };
+  }, []);
+
+  const openMenu = () => {
+    if (!imageUrl) return;
+    setMenuOpen(true);
+  };
+
+  const handlePressStart = () => {
+    if (!imageUrl) return;
+
+    if (longPressTimerRef.current) {
+      window.clearTimeout(longPressTimerRef.current);
+    }
+
+    longPressTimerRef.current = window.setTimeout(() => {
+      setMenuOpen(true);
+    }, 450);
+  };
+
+  const handlePressEnd = () => {
+    if (!longPressTimerRef.current) return;
+    window.clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+  };
+
+  const handleDownloadImage = () => {
+    if (!imageUrl || !order) return;
+
+    const link = document.createElement("a");
+    link.href = imageUrl;
+    link.download = `${order.customer || "未命名客户"}-${exportDateText}.png`;
+    link.click();
+    setMenuOpen(false);
+    setHint("PNG 图片已开始下载。");
+  };
+
+  const handleCopyImage = async () => {
+    if (!imageUrl) return;
 
     try {
-      setIsExporting(true);
-      setDownloadHint("正在导出 PNG 图片...");
+      if (!("ClipboardItem" in window) || !navigator.clipboard?.write) {
+        setHint("当前浏览器暂不支持直接复制图片，请使用下载。");
+        setMenuOpen(false);
+        return;
+      }
 
-      const dataUrl = await toPng(sheetRef.current, {
-        cacheBust: true,
-        pixelRatio: 2,
-        backgroundColor: "#ffffff"
-      });
+      const response = await fetch(imageUrl);
+      const blob = await response.blob();
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          [blob.type || "image/png"]: blob
+        })
+      ]);
 
-      const link = document.createElement("a");
-      link.href = dataUrl;
-      link.download = `销货单-${today}.png`;
-      link.click();
-
-      setDownloadHint("PNG 图片已开始下载。");
-      setMenuOpen(false);
+      setHint("图片已复制到剪贴板。");
     } catch (error) {
       console.error(error);
-      setDownloadHint("图片导出失败，请稍后重试。");
+      setHint("复制图片失败，请使用下载。");
     } finally {
-      setIsExporting(false);
+      setMenuOpen(false);
     }
   };
 
@@ -110,110 +299,61 @@ export function PreviewPage() {
 
   return (
     <main className="page-shell page-shell--preview">
-      <div className="page phone-frame">
-        <TopBar title="销货单预览" rightText="固定模板" />
+      <div className="page phone-frame phone-frame--preview">
+        <TopBar title="销货单预览" rightText="图片预览" />
 
-        <section className="preview-card">
-          <div className="preview-card__head">
-            <div>
-              <h2>正式销货单预览</h2>
-              <p>{downloadHint}</p>
-            </div>
+        <section className="preview-card preview-card--paper preview-card--viewer">
+          <div className="preview-card__head preview-card__head--viewer">
+            <p>{hint}</p>
             <button className="ghost-button" type="button" onClick={() => navigate("/")}>
               返回编辑
             </button>
           </div>
 
-          <div className="preview-wrapper">
-            <div className="preview-sheet" ref={sheetRef}>
-              <div className="sheet-header">
-                <div>
-                  <p className="sheet-caption">AI销货单助手</p>
-                  <h3>销货单</h3>
-                </div>
-                <span>{today}</span>
-              </div>
-
-              <div className="sheet-meta">
-                <div>
-                  <span>客户</span>
-                  <strong>{order.customer}</strong>
-                </div>
-                <div>
-                  <span>电话</span>
-                  <strong>{order.phone}</strong>
-                </div>
-                <div>
-                  <span>地址</span>
-                  <strong>{order.address}</strong>
-                </div>
-                <div>
-                  <span>物流</span>
-                  <strong>{order.logistics}</strong>
-                </div>
-              </div>
-
-              <div className="sheet-table">
-                <div className="sheet-row sheet-row--head">
-                  <span>名称及规格</span>
-                  <span>数量</span>
-                  <span>单价</span>
-                  <span>金额</span>
-                </div>
-
-                {rows.map((item) => (
-                  <div className="sheet-row" key={item.id}>
-                    <span>{item.nameSpec}</span>
-                    <span>{item.quantity}</span>
-                    <span>{item.unitPrice}</span>
-                    <span>{item.amount}</span>
-                  </div>
-                ))}
-              </div>
-
-              <div className="sheet-footer">
-                <div>
-                  <span>备注</span>
-                  <strong>{order.remark || "无"}</strong>
-                </div>
-                <div>
-                  <span>合计金额</span>
-                  <strong>¥ {order.totalAmount}</strong>
-                </div>
-              </div>
+          <div className="preview-wrapper preview-wrapper--viewer">
+            <div
+              className="preview-image-stage"
+              onTouchStart={handlePressStart}
+              onTouchEnd={handlePressEnd}
+              onTouchCancel={handlePressEnd}
+              onMouseDown={handlePressStart}
+              onMouseUp={handlePressEnd}
+              onMouseLeave={handlePressEnd}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                openMenu();
+              }}
+              onClick={openMenu}
+            >
+              {isPreparing ? (
+                <div className="preview-image-placeholder">正在生成销货单图片...</div>
+              ) : imageUrl ? (
+                <img className="preview-image" src={imageUrl} alt="销货单图片预览" />
+              ) : (
+                <div className="preview-image-placeholder">图片生成失败，请返回编辑页重试。</div>
+              )}
             </div>
-
-            <div className="preview-actions">
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => setMenuOpen((v) => !v)}
-              >
-                更多操作
-              </button>
-              <button
-                className="primary-button preview-download-button"
-                type="button"
-                onClick={handleDownloadImage}
-                disabled={isExporting}
-              >
-                {isExporting ? "导出中..." : "下载 PNG"}
-              </button>
-            </div>
-
-            {menuOpen ? (
-              <div className="preview-menu">
-                <button type="button" onClick={handleCopyText}>
-                  复制文字
-                </button>
-                <button type="button" onClick={handleDownloadImage}>
-                  下载图片
-                </button>
-                <p className="preview-menu__note">复制图片到剪贴板本轮先保留为后续能力。</p>
-              </div>
-            ) : null}
           </div>
         </section>
+      </div>
+
+      {menuOpen ? (
+        <div className="preview-action-layer" onClick={() => setMenuOpen(false)}>
+          <div className="preview-action-sheet" onClick={(event) => event.stopPropagation()}>
+            <button type="button" onClick={handleCopyImage}>
+              复制
+            </button>
+            <button type="button" onClick={handleDownloadImage}>
+              下载
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="preview-export-host" aria-hidden="true">
+        <div className="preview-export-frame" ref={exportFrameRef}>
+          <InvoiceSheet order={order} rows={rows} className="preview-sheet--export" />
+        </div>
       </div>
     </main>
   );
