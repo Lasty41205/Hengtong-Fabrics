@@ -65,6 +65,7 @@ function loadEditorSnapshot(): EditorSnapshot {
 export function OrderEditorPage() {
   const navigate = useNavigate();
   const editorSectionRef = useRef<HTMLElement | null>(null);
+  const itemsPanelRef = useRef<HTMLDivElement | null>(null);
   const fieldRefs = useRef<Record<string, FocusableElement | null>>({});
   const initialState = useMemo(loadEditorSnapshot, []);
   const [rawInput, setRawInput] = useState(initialState.rawInput);
@@ -99,6 +100,44 @@ export function OrderEditorPage() {
 
   const registerFieldRef = (key: string) => (node: FocusableElement | null) => {
     fieldRefs.current[key] = node;
+  };
+
+  const focusFieldByKey = (fieldKey: string) => {
+    const target = fieldRefs.current[fieldKey];
+    if (!target) return;
+
+    setActiveFieldKey(fieldKey);
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => {
+      target.focus({ preventScroll: true });
+    }, 160);
+    window.setTimeout(() => {
+      setActiveFieldKey((current) => (current === fieldKey ? "" : current));
+    }, 1400);
+  };
+
+  const moveToFirstItemName = () => {
+    const existingFirstId = form.items[0]?.id;
+
+    if (existingFirstId) {
+      itemsPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      window.setTimeout(() => {
+        focusFieldByKey(`item-${existingFirstId}-nameSpec`);
+      }, 180);
+      return;
+    }
+
+    const newItem = createEmptyItem();
+    setForm((current) => ({
+      ...current,
+      items: [newItem],
+      totalAmount: calculateTotalAmount([newItem])
+    }));
+
+    itemsPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    window.setTimeout(() => {
+      focusFieldByKey(`item-${newItem.id}-nameSpec`);
+    }, 220);
   };
 
   const replacePastedImage = (file: File) => {
@@ -242,29 +281,34 @@ export function OrderEditorPage() {
     });
   };
 
+  const handleCustomLogisticsCommit = () => {
+    window.setTimeout(() => {
+      moveToFirstItemName();
+    }, 100);
+  };
+
   const handleLogisticsSelectChange = (value: string) => {
     if (value === "其他") {
       setUseCustomLogistics(true);
       updateFormField("logistics", "");
+      window.setTimeout(() => {
+        fieldRefs.current.logistics?.focus({ preventScroll: true });
+      }, 120);
       return;
     }
 
     setUseCustomLogistics(false);
     updateFormField("logistics", value);
+
+    if (value) {
+      window.setTimeout(() => {
+        moveToFirstItemName();
+      }, 120);
+    }
   };
 
   const scrollToIssueField = (fieldKey: string) => {
-    const target = fieldRefs.current[fieldKey];
-    if (!target) return;
-
-    setActiveFieldKey(fieldKey);
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
-    window.setTimeout(() => {
-      target.focus({ preventScroll: true });
-    }, 160);
-    window.setTimeout(() => {
-      setActiveFieldKey((current) => (current === fieldKey ? "" : current));
-    }, 1400);
+    focusFieldByKey(fieldKey);
   };
 
   const handleGenerate = () => {
@@ -418,6 +462,13 @@ export function OrderEditorPage() {
                     placeholder="请输入物流名称"
                     value={form.logistics}
                     onChange={(event) => updateFormField("logistics", event.target.value)}
+                    onBlur={handleCustomLogisticsCommit}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        handleCustomLogisticsCommit();
+                      }
+                    }}
                   />
                 ) : null}
 
@@ -435,7 +486,7 @@ export function OrderEditorPage() {
               </label>
             </div>
 
-            <div className="items-panel">
+            <div className="items-panel" ref={itemsPanelRef}>
               <div className="section-title-row">
                 <h3>商品明细</h3>
                 <button className="inline-button" type="button" onClick={handleAddItem}>

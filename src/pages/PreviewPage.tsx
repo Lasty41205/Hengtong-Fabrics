@@ -102,13 +102,17 @@ function InvoiceSheet({ order, rows, className = "" }: InvoiceSheetProps) {
       </div>
 
       <div className="sheet-footer sheet-footer--simple sheet-footer--focus">
-        <div>
-          <span>备注</span>
-          <strong>{order.remark || "无"}</strong>
+        <div className="sheet-footer__block sheet-footer__block--logistics">
+          <span>物流信息</span>
+          <strong>{order.logistics || "待填写"}</strong>
         </div>
-        <div>
+        <div className="sheet-footer__block sheet-footer__block--total">
           <span>合计金额</span>
           <strong>¥ {order.totalAmount}</strong>
+        </div>
+        <div className="sheet-footer__block sheet-footer__block--remark">
+          <span>备注</span>
+          <strong>{order.remark || "无"}</strong>
         </div>
       </div>
 
@@ -358,3 +362,4 @@ export function PreviewPage() {
     </main>
   );
 }
+
