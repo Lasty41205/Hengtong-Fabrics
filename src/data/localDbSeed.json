@@ -1,0 +1,62 @@
+{
+  "version": 2,
+  "lastUpdatedAt": "2026-03-24T00:00:00.000Z",
+  "customers": [
+    {
+      "id": "customer-hengtong",
+      "name": "恒通",
+      "phone": "18339931253",
+      "address": "邯郸",
+      "defaultLogistics": "圆通",
+      "note": "示例客户",
+      "updatedAt": "2026-03-24T00:00:00.000Z"
+    }
+  ],
+  "customerPrices": [
+    {
+      "id": "customer-price-group-hengtong",
+      "customerName": "恒通",
+      "prices": [
+        {
+          "id": "customer-price-hengtong-860",
+          "modelCode": "860",
+          "unitPrice": "18",
+          "updatedAt": "2026-03-24T00:00:00.000Z"
+        }
+      ],
+      "updatedAt": "2026-03-24T00:00:00.000Z"
+    }
+  ],
+  "defaultPrices": [
+    {
+      "id": "default-price-125",
+      "modelCode": "125",
+      "unitPrice": "15",
+      "updatedAt": "2026-03-24T00:00:00.000Z"
+    },
+    {
+      "id": "default-price-420",
+      "modelCode": "420",
+      "unitPrice": "20",
+      "updatedAt": "2026-03-24T00:00:00.000Z"
+    },
+    {
+      "id": "default-price-860",
+      "modelCode": "860",
+      "unitPrice": "16",
+      "updatedAt": "2026-03-24T00:00:00.000Z"
+    },
+    {
+      "id": "default-price-binghuarong",
+      "modelCode": "冰花绒",
+      "unitPrice": "21",
+      "updatedAt": "2026-03-24T00:00:00.000Z"
+    },
+    {
+      "id": "default-price-mabu",
+      "modelCode": "麻布",
+      "unitPrice": "12",
+      "updatedAt": "2026-03-24T00:00:00.000Z"
+    }
+  ]
+}

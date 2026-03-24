@@ -1,24 +1,37 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { TopBar } from "../components/TopBar";
-import { createEmptyForm, createEmptyItem, logisticsOptions } from "../mockData";
-import { OrderForm, OrderItem } from "../types";
 import {
-  calculateAmount,
-  calculateTotalAmount,
-  collectValidationIssues,
-  getInputIssue,
-  parseLocalOrderInput
-} from "../utils";
+  enrichItemWithDatabase,
+  extractModelCode,
+  getPriceSourceLabel,
+  hydrateFormWithDatabase,
+  loadBusinessDatabase,
+  saveBusinessDatabase,
+  syncOrderToDatabase
+} from "../localDb";
+import { PENDING_HISTORY_ID_KEY, saveHistoryRecord } from "../historyStore";
+import {
+  createEmptyForm,
+  createEmptyItem,
+  emptyFreightSelection,
+  expressCarrierOptions,
+  FreightSelectionState,
+  freightPrimaryOptions,
+  logisticsCarrierOptions,
+  resolveFreightSelection
+} from "../mockData";
+import { calculateAmount, calculateTotalAmount } from "../orderMath";
+import { HistoryRecord, LocalBusinessDatabase, OrderForm, OrderItem } from "../types";
+import { collectValidationIssues, getInputIssue, parseLocalOrderInput } from "../utils";
 
 const fieldTips = {
   customer: "客户不能为空",
   phone: "电话不能为空",
   address: "地址不能为空",
-  logistics: "物流不能为空"
+  logistics: "货运方式不能为空"
 } as const;
 
-const presetLogisticsOptions = logisticsOptions.filter((item) => item !== "其他");
 const EDITOR_STATE_KEY = "invoice-editor-state";
 
 type FocusableElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
@@ -32,17 +45,65 @@ type EditorSnapshot = {
   rawInput: string;
   form: OrderForm;
   hasParsed: boolean;
-  useCustomLogistics: boolean;
+  freightSelection: FreightSelectionState;
   hint: string;
+  editingHistoryRecordId: string;
 };
 
+type EditorRouteState = {
+  historyRecord?: HistoryRecord;
+} | null;
+
+function normalizeSnapshotForm(value: Partial<OrderForm> | undefined): OrderForm {
+  const fallback = createEmptyForm();
+  if (!value) return fallback;
+
+  const items = (value.items ?? []).map((item) => {
+    const legacyItem = item as Partial<OrderItem> & { rawModel?: string; priceKey?: string };
+
+    return {
+      ...createEmptyItem(),
+      ...item,
+      modelCode:
+        legacyItem.modelCode ||
+        extractModelCode(legacyItem.nameSpec || legacyItem.rawModel || legacyItem.priceKey || ""),
+      issues: item.issues ?? {}
+    };
+  });
+
+  return {
+    customer: value.customer ?? fallback.customer,
+    phone: value.phone ?? fallback.phone,
+    address: value.address ?? fallback.address,
+    logistics: value.logistics ?? fallback.logistics,
+    remark: value.remark ?? fallback.remark,
+    items: items.length > 0 ? items : fallback.items,
+    totalAmount: value.totalAmount ?? fallback.totalAmount,
+    issues: value.issues ?? {}
+  };
+}
+
+function normalizeFreightSelection(
+  value: Partial<FreightSelectionState> | undefined,
+  logisticsValue: string
+): FreightSelectionState {
+  const resolved = resolveFreightSelection(logisticsValue);
+  return {
+    primary: value?.primary ?? resolved.primary,
+    secondary: value?.secondary ?? resolved.secondary,
+    customMode: value?.customMode ?? resolved.customMode,
+    customText: value?.customText ?? resolved.customText
+  };
+}
+
 function loadEditorSnapshot(): EditorSnapshot {
-  const defaultState = {
+  const defaultState: EditorSnapshot = {
     rawInput: "",
     form: createEmptyForm(),
     hasParsed: false,
-    useCustomLogistics: false,
-    hint: "当前为本地规则解析版本，未接真实 AI。物流需手动选择。"
+    freightSelection: emptyFreightSelection(),
+    hint: "当前为 Phase 2 本地数据库版本，优先按客户价和默认价补全。",
+    editingHistoryRecordId: ""
   };
 
   try {
@@ -50,45 +111,118 @@ function loadEditorSnapshot(): EditorSnapshot {
     if (!saved) return defaultState;
 
     const parsed = JSON.parse(saved) as Partial<EditorSnapshot>;
+    const form = normalizeSnapshotForm(parsed.form);
     return {
       rawInput: parsed.rawInput ?? defaultState.rawInput,
-      form: parsed.form ?? defaultState.form,
+      form,
       hasParsed: parsed.hasParsed ?? defaultState.hasParsed,
-      useCustomLogistics: parsed.useCustomLogistics ?? defaultState.useCustomLogistics,
-      hint: parsed.hint ?? defaultState.hint
+      freightSelection: normalizeFreightSelection(parsed.freightSelection, form.logistics),
+      hint: parsed.hint ?? defaultState.hint,
+      editingHistoryRecordId: parsed.editingHistoryRecordId ?? ""
     };
   } catch {
     return defaultState;
   }
 }
 
+function buildFreightValue(selection: FreightSelectionState) {
+  if (selection.primary === "/") return "/";
+
+  if (selection.customMode === "primary") {
+    return selection.customText.trim();
+  }
+
+  if (selection.customMode === "secondary") {
+    return selection.primary && selection.customText.trim()
+      ? `${selection.primary}-${selection.customText.trim()}`
+      : "";
+  }
+
+  if (selection.primary === "物流" || selection.primary === "快递") {
+    return selection.secondary ? `${selection.primary}-${selection.secondary}` : "";
+  }
+
+  return "";
+}
+
+function buildFormFromHistoryRecord(record: HistoryRecord): OrderForm {
+  const items = record.items.map((item) => ({
+    ...createEmptyItem(),
+    ...item,
+    priceSource: item.priceSource || "manual",
+    issues: {}
+  }));
+
+  return {
+    customer: record.customer,
+    phone: record.phone,
+    address: record.address,
+    logistics: record.logistics,
+    remark: record.remark,
+    items: items.length > 0 ? items : [createEmptyItem()],
+    totalAmount: record.totalAmount || calculateTotalAmount(items),
+    issues: {}
+  };
+}
+
+function buildStateFromHistoryRecord(record: HistoryRecord): EditorSnapshot {
+  const form = buildFormFromHistoryRecord(record);
+  return {
+    rawInput: record.rawInput,
+    form,
+    hasParsed: true,
+    freightSelection: resolveFreightSelection(record.logistics),
+    hint: "已载入历史记录，可直接修改后重新生成。",
+    editingHistoryRecordId: record.id
+  };
+}
+
 export function OrderEditorPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const editorSectionRef = useRef<HTMLElement | null>(null);
   const itemsPanelRef = useRef<HTMLDivElement | null>(null);
   const fieldRefs = useRef<Record<string, FocusableElement | null>>({});
-  const initialState = useMemo(loadEditorSnapshot, []);
+  const routeState = location.state as EditorRouteState;
+  const routeHistoryRecord = routeState?.historyRecord;
+  const initialDatabase = useMemo<LocalBusinessDatabase>(() => loadBusinessDatabase(), []);
+  const initialState = useMemo(
+    () => (routeHistoryRecord ? buildStateFromHistoryRecord(routeHistoryRecord) : loadEditorSnapshot()),
+    [routeHistoryRecord]
+  );
+  const [database, setDatabase] = useState(initialDatabase);
   const [rawInput, setRawInput] = useState(initialState.rawInput);
-  const [form, setForm] = useState<OrderForm>(initialState.form);
+  const [form, setForm] = useState<OrderForm>(() =>
+    routeHistoryRecord ? initialState.form : hydrateFormWithDatabase(initialState.form, initialDatabase)
+  );
   const [hasParsed, setHasParsed] = useState(initialState.hasParsed);
   const [hint, setHint] = useState(initialState.hint);
-  const [useCustomLogistics, setUseCustomLogistics] = useState(initialState.useCustomLogistics);
+  const [freightSelection, setFreightSelection] = useState<FreightSelectionState>(initialState.freightSelection);
+  const [editingHistoryRecordId, setEditingHistoryRecordId] = useState(initialState.editingHistoryRecordId);
   const [activeFieldKey, setActiveFieldKey] = useState("");
   const [pastedImage, setPastedImage] = useState<PastedImage | null>(null);
 
   const invalidCount = useMemo(() => collectValidationIssues(form).length, [form]);
+  const secondaryFreightOptions = useMemo(() => {
+    if (freightSelection.primary === "物流") return logisticsCarrierOptions;
+    if (freightSelection.primary === "快递") return expressCarrierOptions;
+    return [];
+  }, [freightSelection.primary]);
+  const showFreightSecondary = freightSelection.primary === "物流" || freightSelection.primary === "快递";
+  const showFreightCustomInput = freightSelection.customMode !== "none";
 
   useEffect(() => {
     const snapshot: EditorSnapshot = {
       rawInput,
       form,
       hasParsed,
-      useCustomLogistics,
-      hint
+      freightSelection,
+      hint,
+      editingHistoryRecordId
     };
 
     sessionStorage.setItem(EDITOR_STATE_KEY, JSON.stringify(snapshot));
-  }, [form, hasParsed, hint, rawInput, useCustomLogistics]);
+  }, [editingHistoryRecordId, form, freightSelection, hasParsed, hint, rawInput]);
 
   useEffect(() => {
     return () => {
@@ -151,21 +285,31 @@ export function OrderEditorPage() {
         url: URL.createObjectURL(file)
       };
     });
-    setHint("已粘贴图片，本轮先展示预览，后续再接 OCR。物流需手动选择。");
+    setHint("已粘贴图片，本阶段仍不做 OCR，只保留图片预览。");
   };
 
   const updateFormField = (key: keyof OrderForm, value: string) => {
-    setForm((current) => ({
-      ...current,
-      [key]: value,
-      issues:
-        key in current.issues
-          ? {
-              ...current.issues,
-              [key]: undefined
-            }
-          : current.issues
-    }));
+    const previewForm = key === "customer" ? hydrateFormWithDatabase({ ...form, customer: value }, database) : null;
+
+    setForm((current) => {
+      const nextForm = {
+        ...current,
+        [key]: value,
+        issues:
+          key in current.issues
+            ? {
+                ...current.issues,
+                [key]: undefined
+              }
+            : current.issues
+      };
+
+      return key === "customer" ? hydrateFormWithDatabase(nextForm, database) : nextForm;
+    });
+
+    if (previewForm) {
+      setFreightSelection(resolveFreightSelection(previewForm.logistics));
+    }
   };
 
   const updateItem = (itemId: string, patch: Partial<OrderItem>) => {
@@ -173,21 +317,62 @@ export function OrderEditorPage() {
       const items = current.items.map((item) => {
         if (item.id !== itemId) return item;
 
-        const nextItem = { ...item, ...patch };
-        const nextAmount =
-          patch.quantity !== undefined || patch.unitPrice !== undefined
-            ? calculateAmount(nextItem.quantity, nextItem.unitPrice)
-            : nextItem.amount;
+        const nextItemBase: OrderItem = {
+          ...item,
+          ...patch,
+          modelCode:
+            patch.nameSpec !== undefined
+              ? extractModelCode(patch.nameSpec)
+              : patch.modelCode !== undefined
+                ? patch.modelCode
+                : item.modelCode,
+          unitPrice: patch.unitPrice !== undefined ? patch.unitPrice : item.unitPrice,
+          priceSource:
+            patch.unitPrice !== undefined
+              ? patch.unitPrice.trim()
+                ? "manual"
+                : "none"
+              : item.priceSource
+        };
+
+        if (patch.unitPrice !== undefined) {
+          const amount = calculateAmount(nextItemBase.quantity, patch.unitPrice);
+          const priceIssue =
+            nextItemBase.modelCode && !patch.unitPrice.trim()
+              ? {
+                  level: "unmatched" as const,
+                  message: "未匹配到价格，请手动输入"
+                }
+              : undefined;
+
+          return {
+            ...nextItemBase,
+            amount,
+            issues: {
+              ...nextItemBase.issues,
+              ...(patch.nameSpec !== undefined ? { nameSpec: undefined } : {}),
+              ...(patch.quantity !== undefined ? { quantity: undefined } : {}),
+              unitPrice: priceIssue,
+              ...(amount ? { amount: undefined } : {})
+            }
+          };
+        }
+
+        const hydratedItem =
+          patch.nameSpec !== undefined
+            ? enrichItemWithDatabase(nextItemBase, current.customer, database)
+            : {
+                ...nextItemBase,
+                amount: calculateAmount(nextItemBase.quantity, nextItemBase.unitPrice)
+              };
 
         return {
-          ...nextItem,
-          amount: nextAmount,
+          ...hydratedItem,
           issues: {
-            ...nextItem.issues,
+            ...hydratedItem.issues,
             ...(patch.nameSpec !== undefined ? { nameSpec: undefined } : {}),
             ...(patch.quantity !== undefined ? { quantity: undefined } : {}),
-            ...(patch.unitPrice !== undefined ? { unitPrice: undefined } : {}),
-            ...(nextAmount ? { amount: undefined } : {})
+            ...(hydratedItem.amount ? { amount: undefined } : {})
           }
         };
       });
@@ -228,10 +413,10 @@ export function OrderEditorPage() {
   };
 
   const handleParse = () => {
-    const parsed = parseLocalOrderInput(rawInput);
+    const parsed = parseLocalOrderInput(rawInput, database);
     setForm(parsed.form);
     setHasParsed(true);
-    setUseCustomLogistics(false);
+    setFreightSelection(resolveFreightSelection(parsed.form.logistics));
     setHint(
       pastedImage
         ? `${parsed.summary} 已检测到粘贴图片，本轮暂不识别图片内容。`
@@ -245,7 +430,8 @@ export function OrderEditorPage() {
     setRawInput("");
     setForm(createEmptyForm());
     setHasParsed(false);
-    setUseCustomLogistics(false);
+    setFreightSelection(emptyFreightSelection());
+    setEditingHistoryRecordId("");
     setActiveFieldKey("");
     setPastedImage((current) => {
       if (current?.url) {
@@ -255,11 +441,13 @@ export function OrderEditorPage() {
     });
     setHint("内容已清空。");
     sessionStorage.removeItem(EDITOR_STATE_KEY);
+    sessionStorage.removeItem(PENDING_HISTORY_ID_KEY);
   };
 
   const handleAddItem = () => {
     setForm((current) => {
-      const items = [...current.items, createEmptyItem()];
+      const newItem = enrichItemWithDatabase(createEmptyItem(), current.customer, database);
+      const items = [...current.items, newItem];
       return {
         ...current,
         items,
@@ -281,15 +469,42 @@ export function OrderEditorPage() {
     });
   };
 
-  const handleCustomLogisticsCommit = () => {
+  const handleCustomFreightCommit = () => {
+    if (!form.logistics.trim()) return;
     window.setTimeout(() => {
       moveToFirstItemName();
     }, 100);
   };
 
-  const handleLogisticsSelectChange = (value: string) => {
+  const handleFreightPrimaryChange = (value: string) => {
+    if (!value) {
+      setFreightSelection(emptyFreightSelection());
+      updateFormField("logistics", "");
+      return;
+    }
+
+    if (value === "/") {
+      const nextSelection: FreightSelectionState = {
+        primary: "/",
+        secondary: "",
+        customMode: "none",
+        customText: ""
+      };
+      setFreightSelection(nextSelection);
+      updateFormField("logistics", "/");
+      window.setTimeout(() => {
+        moveToFirstItemName();
+      }, 120);
+      return;
+    }
+
     if (value === "其他") {
-      setUseCustomLogistics(true);
+      setFreightSelection({
+        primary: "其他",
+        secondary: "",
+        customMode: "primary",
+        customText: ""
+      });
       updateFormField("logistics", "");
       window.setTimeout(() => {
         fieldRefs.current.logistics?.focus({ preventScroll: true });
@@ -297,14 +512,64 @@ export function OrderEditorPage() {
       return;
     }
 
-    setUseCustomLogistics(false);
-    updateFormField("logistics", value);
+    setFreightSelection({
+      primary: value as FreightSelectionState["primary"],
+      secondary: "",
+      customMode: "none",
+      customText: ""
+    });
+    updateFormField("logistics", "");
+  };
 
-    if (value) {
-      window.setTimeout(() => {
-        moveToFirstItemName();
-      }, 120);
+  const handleFreightSecondaryChange = (value: string) => {
+    if (value === "返回") {
+      setFreightSelection(emptyFreightSelection());
+      updateFormField("logistics", "");
+      return;
     }
+
+    if (value === "其他") {
+      setFreightSelection((current) => ({
+        ...current,
+        secondary: "其他",
+        customMode: "secondary",
+        customText: ""
+      }));
+      updateFormField("logistics", "");
+      window.setTimeout(() => {
+        fieldRefs.current.logistics?.focus({ preventScroll: true });
+      }, 120);
+      return;
+    }
+
+    const nextValue = buildFreightValue({
+      ...freightSelection,
+      secondary: value,
+      customMode: "none",
+      customText: ""
+    });
+
+    setFreightSelection((current) => ({
+      ...current,
+      secondary: value,
+      customMode: "none",
+      customText: ""
+    }));
+    updateFormField("logistics", nextValue);
+    window.setTimeout(() => {
+      moveToFirstItemName();
+    }, 120);
+  };
+
+  const handleCustomFreightChange = (value: string) => {
+    setFreightSelection((current) => {
+      const nextSelection = {
+        ...current,
+        customText: value
+      };
+      updateFormField("logistics", buildFreightValue(nextSelection));
+      return nextSelection;
+    });
   };
 
   const scrollToIssueField = (fieldKey: string) => {
@@ -321,14 +586,29 @@ export function OrderEditorPage() {
       return;
     }
 
+    const syncResult = syncOrderToDatabase(form, database);
+    const nextDatabase = syncResult.changed ? saveBusinessDatabase(syncResult.database) : database;
+    const nextHint = syncResult.changed ? syncResult.summary : hint;
+
+    if (syncResult.changed) {
+      setDatabase(nextDatabase);
+      setHint(nextHint);
+    }
+
+    const historyRecord = saveHistoryRecord(rawInput, form, editingHistoryRecordId || undefined);
+    setEditingHistoryRecordId(historyRecord.id);
+    sessionStorage.setItem(PENDING_HISTORY_ID_KEY, historyRecord.id);
+
     const snapshot: EditorSnapshot = {
       rawInput,
       form,
       hasParsed: true,
-      useCustomLogistics,
-      hint
+      freightSelection,
+      hint: nextHint,
+      editingHistoryRecordId: historyRecord.id
     };
 
+    sessionStorage.setItem(EDITOR_STATE_KEY, JSON.stringify(snapshot));
     sessionStorage.setItem(EDITOR_STATE_KEY, JSON.stringify(snapshot));
     sessionStorage.setItem("invoice-preview-order", JSON.stringify(form));
     navigate("/preview", { state: { order: form } });
@@ -342,12 +622,22 @@ export function OrderEditorPage() {
   return (
     <main className="page-shell">
       <div className="page phone-frame">
-        <TopBar title="订单编辑" rightText="Phase 1 MVP" />
+        <TopBar title="订单编辑" rightText="Phase 2 本地库" />
 
         <section className="hero-card">
-          <div className="hero-card__heading">
-            <h2>快速录入报单</h2>
-            <span className="status-chip">移动端优先</span>
+          <div className="hero-card__heading hero-card__heading--stack hero-card__heading--mobile-actions">
+            <div>
+              <h2>快速录入报单</h2>
+              <span className="status-chip">客户价优先</span>
+            </div>
+            <div className="hero-card__quick-links">
+              <button className="ghost-button btn-nav-history" type="button" onClick={() => navigate("/history")}>
+                历史记录
+              </button>
+              <button className="ghost-button btn-nav-database" type="button" onClick={() => navigate("/database")}>
+                数据库管理
+              </button>
+            </div>
           </div>
 
           <textarea
@@ -362,7 +652,11 @@ export function OrderEditorPage() {
             <div className="pasted-image-card">
               <div className="pasted-image-card__head">
                 <span>已粘贴图片</span>
-                <button className="ghost-button pasted-image-card__remove" type="button" onClick={handleRemovePastedImage}>
+                <button
+                  className="ghost-button btn-utility pasted-image-card__remove"
+                  type="button"
+                  onClick={handleRemovePastedImage}
+                >
                   删除图片
                 </button>
               </div>
@@ -371,10 +665,10 @@ export function OrderEditorPage() {
           ) : null}
 
           <div className="action-row">
-            <button className="secondary-button" type="button" onClick={handleParse}>
-              AI解析
+            <button className="secondary-button btn-action-soft" type="button" onClick={handleParse}>
+              本地解析
             </button>
-            <button className="ghost-button" type="button" onClick={handleClear}>
+            <button className="ghost-button btn-utility" type="button" onClick={handleClear}>
               清空
             </button>
           </div>
@@ -433,40 +727,55 @@ export function OrderEditorPage() {
               </label>
 
               <div className="field-block">
-                <span className="field-label">物流</span>
+                <span className="field-label">货运方式</span>
                 <select
-                  ref={useCustomLogistics ? undefined : registerFieldRef("logistics")}
+                  ref={registerFieldRef("logistics")}
                   className={`field-input field-select ${logisticsIssue ? "is-invalid" : ""} ${
-                    activeFieldKey === "logistics" && !useCustomLogistics ? "field-attention" : ""
+                    activeFieldKey === "logistics" ? "field-attention" : ""
                   }`}
                   data-invalid={logisticsIssue ? "true" : "false"}
-                  value={useCustomLogistics ? "其他" : form.logistics}
-                  onChange={(event) => handleLogisticsSelectChange(event.target.value)}
+                  value={freightSelection.primary}
+                  onChange={(event) => handleFreightPrimaryChange(event.target.value)}
                 >
-                  <option value="">请选择物流</option>
-                  {presetLogisticsOptions.map((item) => (
+                  <option value="">请选择货运方式</option>
+                  {freightPrimaryOptions.map((item) => (
                     <option key={item} value={item}>
                       {item}
                     </option>
                   ))}
-                  <option value="其他">其他</option>
                 </select>
 
-                {useCustomLogistics ? (
+                {showFreightSecondary ? (
+                  <select
+                    className={`field-input field-select field-input--sub ${logisticsIssue ? "is-invalid" : ""}`}
+                    data-invalid={logisticsIssue ? "true" : "false"}
+                    value={freightSelection.secondary}
+                    onChange={(event) => handleFreightSecondaryChange(event.target.value)}
+                  >
+                    <option value="">请选择具体方式</option>
+                    {secondaryFreightOptions.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
+
+                {showFreightCustomInput ? (
                   <input
                     ref={registerFieldRef("logistics")}
                     className={`field-input field-input--sub ${logisticsIssue ? "is-invalid" : ""} ${
                       activeFieldKey === "logistics" ? "field-attention" : ""
                     }`}
                     data-invalid={logisticsIssue ? "true" : "false"}
-                    placeholder="请输入物流名称"
-                    value={form.logistics}
-                    onChange={(event) => updateFormField("logistics", event.target.value)}
-                    onBlur={handleCustomLogisticsCommit}
+                    placeholder={freightSelection.customMode === "primary" ? "请输入货运方式" : "请输入具体货运方式"}
+                    value={freightSelection.customText}
+                    onChange={(event) => handleCustomFreightChange(event.target.value)}
+                    onBlur={handleCustomFreightCommit}
                     onKeyDown={(event) => {
                       if (event.key === "Enter") {
                         event.preventDefault();
-                        handleCustomLogisticsCommit();
+                        handleCustomFreightCommit();
                       }
                     }}
                   />
@@ -489,7 +798,7 @@ export function OrderEditorPage() {
             <div className="items-panel" ref={itemsPanelRef}>
               <div className="section-title-row">
                 <h3>商品明细</h3>
-                <button className="inline-button" type="button" onClick={handleAddItem}>
+                <button className="inline-button btn-action-soft" type="button" onClick={handleAddItem}>
                   添加一行
                 </button>
               </div>
@@ -509,6 +818,7 @@ export function OrderEditorPage() {
                   const quantityIssue = getInputIssue(item.issues.quantity, item.quantity, "请填写数量");
                   const priceIssue = getInputIssue(item.issues.unitPrice, item.unitPrice, "请填写单价");
                   const amountIssue = getInputIssue(item.issues.amount, item.amount, "金额将自动计算");
+                  const priceSourceLabel = getPriceSourceLabel(item.priceSource);
 
                   return (
                     <div className="item-row item-row--compact" key={item.id}>
@@ -525,6 +835,7 @@ export function OrderEditorPage() {
                           value={item.nameSpec}
                           onChange={(event) => updateItem(item.id, { nameSpec: event.target.value })}
                         />
+                        {item.modelCode ? <span className="table-meta">版号: {item.modelCode}</span> : null}
                         {nameIssue ? <span className="table-error">{nameIssue.message}</span> : null}
                       </div>
 
@@ -555,6 +866,7 @@ export function OrderEditorPage() {
                           value={item.unitPrice}
                           onChange={(event) => updateItem(item.id, { unitPrice: event.target.value })}
                         />
+                        {priceSourceLabel ? <span className="table-badge">{priceSourceLabel}</span> : null}
                         {priceIssue ? <span className="table-error">{priceIssue.message}</span> : null}
                       </div>
 
@@ -599,12 +911,13 @@ export function OrderEditorPage() {
         ) : (
           <section className="empty-card">
             <h2>等待解析</h2>
+            <p>先粘贴报单内容，再用本地数据库补全客户资料和价格。</p>
           </section>
         )}
 
         <div className="bottom-bar">
           <div className="bottom-bar__hint">{hint}</div>
-          <button className="primary-button" type="button" onClick={handleGenerate}>
+          <button className="primary-button btn-action-primary" type="button" onClick={handleGenerate}>
             生成销货单
           </button>
         </div>
@@ -612,3 +925,5 @@ export function OrderEditorPage() {
     </main>
   );
 }
+
+

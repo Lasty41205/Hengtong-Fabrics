@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { toPng } from "html-to-image";
 import { useLocation, useNavigate } from "react-router-dom";
 import { TopBar } from "../components/TopBar";
+import { PENDING_HISTORY_ID_KEY, updateHistoryRecordImage } from "../historyStore";
 import { OrderForm, OrderItem } from "../types";
 
 const FIXED_ROWS = 8;
@@ -103,7 +104,7 @@ function InvoiceSheet({ order, rows, className = "" }: InvoiceSheetProps) {
 
       <div className="sheet-footer sheet-footer--simple sheet-footer--focus">
         <div className="sheet-footer__block sheet-footer__block--logistics">
-          <span>物流信息</span>
+          <span>货运方式</span>
           <strong>{order.logistics || "待填写"}</strong>
         </div>
         <div className="sheet-footer__block sheet-footer__block--total">
@@ -195,6 +196,11 @@ export function PreviewPage() {
         const nextImageUrl = await buildImage();
         if (!cancelled) {
           setImageUrl(nextImageUrl);
+          const pendingHistoryId = sessionStorage.getItem(PENDING_HISTORY_ID_KEY) || "";
+          if (pendingHistoryId && nextImageUrl) {
+            updateHistoryRecordImage(pendingHistoryId, nextImageUrl);
+            sessionStorage.removeItem(PENDING_HISTORY_ID_KEY);
+          }
           setHint("长按图片可复制或下载。");
         }
       } catch (error) {
@@ -292,7 +298,7 @@ export function PreviewPage() {
           <section className="empty-card empty-card--preview">
             <h2>暂无预览数据</h2>
             <p>请先返回订单编辑页生成一份有效销货单。</p>
-            <button className="secondary-button" type="button" onClick={() => navigate("/")}>
+            <button className="secondary-button btn-nav-back" type="button" onClick={() => navigate("/")}>
               返回编辑页
             </button>
           </section>
@@ -309,7 +315,7 @@ export function PreviewPage() {
         <section className="preview-card preview-card--paper preview-card--viewer">
           <div className="preview-card__head preview-card__head--viewer">
             <p>{hint}</p>
-            <button className="ghost-button" type="button" onClick={() => navigate("/")}>
+            <button className="ghost-button btn-nav-back" type="button" onClick={() => navigate("/")}>
               返回编辑
             </button>
           </div>
@@ -362,4 +368,5 @@ export function PreviewPage() {
     </main>
   );
 }
+
 
