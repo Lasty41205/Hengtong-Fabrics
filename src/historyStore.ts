@@ -5,9 +5,14 @@ export const PENDING_HISTORY_ID_KEY = "invoice-pending-history-id";
 
 const padText = (value: number) => String(value).padStart(2, "0");
 
+export const formatHistoryDate = (dateValue: Date | string) => {
+  const date = typeof dateValue === "string" ? new Date(dateValue) : dateValue;
+  return `${date.getFullYear()}-${padText(date.getMonth() + 1)}-${padText(date.getDate())}`;
+};
+
 export const formatHistoryTime = (dateValue: Date | string) => {
   const date = typeof dateValue === "string" ? new Date(dateValue) : dateValue;
-  return `${date.getFullYear()}-${padText(date.getMonth() + 1)}-${padText(date.getDate())} ${padText(date.getHours())}:${padText(date.getMinutes())}:${padText(date.getSeconds())}`;
+  return `${formatHistoryDate(date)} ${padText(date.getHours())}:${padText(date.getMinutes())}:${padText(date.getSeconds())}`;
 };
 
 const sanitizeHistoryRecord = (record: Partial<HistoryRecord>): HistoryRecord => ({
@@ -97,3 +102,4 @@ export function updateHistoryRecordImage(recordId: string, previewImageDataUrl: 
 
   saveHistoryRecords(nextRecords);
 }
+

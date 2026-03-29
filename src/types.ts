@@ -9,6 +9,43 @@ export type ItemFieldKey = "nameSpec" | "quantity" | "unitPrice" | "amount";
 
 export type PriceSource = "customer" | "default" | "manual" | "none";
 
+export type BillingRecordType = "auto_add" | "manual_add" | "manual_payment";
+export type BillingPaymentMethod = "微信" | "支付宝" | "现金" | "银行收款码" | "其他";
+
+export type BillingOrderSnapshot = {
+  rawInput: string;
+  customer: string;
+  totalAmount: string;
+  createdAtText: string;
+};
+
+export type BillingSummary = {
+  includeInLedger: boolean;
+  previousBalance: string;
+  currentAmount: string;
+  totalAmount: string;
+  relatedOrderId: string;
+};
+
+export type BillingRecord = {
+  id: string;
+  customerName: string;
+  type: BillingRecordType;
+  dateTime: string;
+  amount: string;
+  note: string;
+  paymentMethod: BillingPaymentMethod | "";
+  relatedOrderId: string;
+  orderInfo?: BillingOrderSnapshot;
+};
+
+export type BillingCustomerSummary = {
+  customerName: string;
+  currentBalance: string;
+  lastUpdatedAt: string;
+  lastRecordSummary: string;
+};
+
 export type OrderItem = {
   id: string;
   nameSpec: string;
@@ -28,6 +65,7 @@ export type OrderForm = {
   remark: string;
   items: OrderItem[];
   totalAmount: string;
+  billingSummary?: BillingSummary;
   issues: Partial<Record<"customer" | "phone" | "address" | "logistics", FieldIssue>>;
 };
 

@@ -107,15 +107,34 @@ function InvoiceSheet({ order, rows, className = "" }: InvoiceSheetProps) {
           <span>货运方式</span>
           <strong>{order.logistics || "待填写"}</strong>
         </div>
-        <div className="sheet-footer__block sheet-footer__block--total">
-          <span>合计金额</span>
-          <strong>¥ {order.totalAmount}</strong>
-        </div>
+        {!order.billingSummary?.includeInLedger ? (
+          <div className="sheet-footer__block sheet-footer__block--total">
+            <span>合计金额</span>
+            <strong>¥ {order.totalAmount}</strong>
+          </div>
+        ) : null}
         <div className="sheet-footer__block sheet-footer__block--remark">
           <span>备注</span>
           <strong>{order.remark || "无"}</strong>
         </div>
       </div>
+
+      {order.billingSummary?.includeInLedger ? (
+        <div className="sheet-footer sheet-footer--simple sheet-footer--billing">
+          <div className="sheet-footer__block">
+            <span>历史金额</span>
+            <strong>¥ {order.billingSummary.previousBalance}</strong>
+          </div>
+          <div className="sheet-footer__block">
+            <span>本次金额</span>
+            <strong>¥ {order.billingSummary.currentAmount}</strong>
+          </div>
+          <div className="sheet-footer__block sheet-footer__block--total">
+            <span>合计金额</span>
+            <strong>¥ {order.billingSummary.totalAmount}</strong>
+          </div>
+        </div>
+      ) : null}
 
       <div className="invoice-simple-bottom">
         <p>{companyInfo.business}</p>
@@ -368,5 +387,6 @@ export function PreviewPage() {
     </main>
   );
 }
+
 
 

@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import seedDatabase from "../data/localDbSeed.json";
+import { includesKeyword } from "../components/HighlightedText";
 import { TopBar } from "../components/TopBar";
 import {
-  compareModelCode,
   downloadBusinessDatabase,
   loadBusinessDatabase,
   sanitizeDatabase,
   saveBusinessDatabase,
-  sortDatabase
 } from "../localDb";
 import {
   CustomerPriceEntry,
@@ -26,14 +25,8 @@ const tableLabels: Record<ActiveTable, string> = {
   defaultPrices: "默认单价表"
 };
 
-const countLabels: Record<ActiveTable, string> = {
-  customers: "客户",
-  customerPrices: "客户价组",
-  defaultPrices: "默认价"
-};
-
 const searchPlaceholders: Record<ActiveTable, string> = {
-  customers: "按客户名搜索",
+  customers: "按客户名、电话或地址搜索",
   customerPrices: "按客户名或版号搜索",
   defaultPrices: "按版号搜索"
 };
@@ -83,41 +76,30 @@ export function DatabaseManagerPage() {
     "这里展示的是本地业务数据库，页面内修改先保留为草稿，点击保存后才会写入当前设备。"
   );
 
-  const viewDatabase = useMemo(() => sortDatabase(draftDatabase), [draftDatabase]);
-  const hasUnsavedChanges = useMemo(
-    () => JSON.stringify(sortDatabase(savedDatabase)) !== JSON.stringify(sortDatabase(draftDatabase)),
-    [draftDatabase, savedDatabase]
-  );
+  const viewDatabase = draftDatabase;
+  const hasUnsavedChanges = useMemo(() => JSON.stringify(savedDatabase) !== JSON.stringify(draftDatabase), [draftDatabase, savedDatabase]);
 
-  const counts = useMemo(
-    () => ({
-      customers: viewDatabase.customers.length,
-      customerPrices: viewDatabase.customerPrices.length,
-      defaultPrices: viewDatabase.defaultPrices.length
-    }),
-    [viewDatabase]
-  );
-
-  const normalizedKeyword = searchKeyword.trim().toUpperCase();
 
   const filteredCustomers = useMemo(() => {
-    if (!normalizedKeyword) return viewDatabase.customers;
-    return viewDatabase.customers.filter((row) => row.name.toUpperCase().includes(normalizedKeyword));
-  }, [normalizedKeyword, viewDatabase.customers]);
+    if (!searchKeyword.trim()) return viewDatabase.customers;
+    return viewDatabase.customers.filter((row) =>
+      includesKeyword([row.name, row.phone, row.address].join(" "), searchKeyword)
+    );
+  }, [searchKeyword, viewDatabase.customers]);
 
   const filteredCustomerPriceGroups = useMemo(() => {
-    if (!normalizedKeyword) return viewDatabase.customerPrices;
+    if (!searchKeyword.trim()) return viewDatabase.customerPrices;
 
     return viewDatabase.customerPrices.filter((group) => {
-      if (group.customerName.toUpperCase().includes(normalizedKeyword)) return true;
-      return group.prices.some((entry) => entry.modelCode.toUpperCase().includes(normalizedKeyword));
+      if (includesKeyword(group.customerName, searchKeyword)) return true;
+      return group.prices.some((entry) => includesKeyword(entry.modelCode, searchKeyword));
     });
-  }, [normalizedKeyword, viewDatabase.customerPrices]);
+  }, [searchKeyword, viewDatabase.customerPrices]);
 
   const filteredDefaultPrices = useMemo(() => {
-    if (!normalizedKeyword) return viewDatabase.defaultPrices;
-    return viewDatabase.defaultPrices.filter((row) => row.modelCode.toUpperCase().includes(normalizedKeyword));
-  }, [normalizedKeyword, viewDatabase.defaultPrices]);
+    if (!searchKeyword.trim()) return viewDatabase.defaultPrices;
+    return viewDatabase.defaultPrices.filter((row) => includesKeyword(row.modelCode, searchKeyword));
+  }, [searchKeyword, viewDatabase.defaultPrices]);
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -158,7 +140,7 @@ export function DatabaseManagerPage() {
     const confirmed = window.confirm("确认保存当前数据库修改吗？保存后会覆盖当前设备里的本地数据库。");
     if (!confirmed) return;
 
-    const nextDatabase = saveBusinessDatabase(viewDatabase);
+    const nextDatabase = saveBusinessDatabase(draftDatabase);
     setSavedDatabase(nextDatabase);
     setDraftDatabase(nextDatabase);
     setNotice("数据库已保存到当前设备。");
@@ -381,6 +363,9 @@ export function DatabaseManagerPage() {
               <button className="ghost-button btn-nav-history" type="button" onClick={() => navigate("/history")}>
                 历史记录
               </button>
+              <button className="ghost-button btn-nav-billing" type="button" onClick={() => navigate("/billing")}>
+                账单
+              </button>
               <button className="ghost-button btn-utility" type="button" onClick={handleExport}>
                 导出 JSON
               </button>
@@ -398,8 +383,7 @@ export function DatabaseManagerPage() {
                 className={`db-summary-card ${activeTable === tableKey ? "db-summary-card--active" : ""}`}
                 onClick={() => setActiveTable(tableKey)}
               >
-                <strong>{counts[tableKey]}</strong>
-                <span>{countLabels[tableKey]}</span>
+                <span>{tableLabels[tableKey].replace("表", "")}</span>
                 <em>{tableLabels[tableKey]}</em>
               </button>
             ))}
@@ -442,12 +426,12 @@ export function DatabaseManagerPage() {
                   </thead>
                   <tbody>
                     {filteredCustomers.map((row) => (
-                      <tr key={row.id}>
-                        <td><input className="db-table-input" value={row.name} onChange={(event) => handleCustomerChange(row.id, "name", event.target.value)} /></td>
-                        <td><input className="db-table-input" value={row.phone} onChange={(event) => handleCustomerChange(row.id, "phone", event.target.value)} /></td>
-                        <td><input className="db-table-input" value={row.address} onChange={(event) => handleCustomerChange(row.id, "address", event.target.value)} /></td>
-                        <td><input className="db-table-input" value={row.defaultLogistics} onChange={(event) => handleCustomerChange(row.id, "defaultLogistics", event.target.value)} /></td>
-                        <td><input className="db-table-input" value={row.note} onChange={(event) => handleCustomerChange(row.id, "note", event.target.value)} /></td>
+                      <tr key={row.id} className={includesKeyword([row.name, row.phone, row.address, row.defaultLogistics, row.note].join(" "), searchKeyword) ? "search-hit-row" : ""}>
+                        <td><input className={`db-table-input ${includesKeyword(row.name, searchKeyword) ? "search-hit-input" : ""}`} value={row.name} onChange={(event) => handleCustomerChange(row.id, "name", event.target.value)} /></td>
+                        <td><input className={`db-table-input ${includesKeyword(row.phone, searchKeyword) ? "search-hit-input" : ""}`} value={row.phone} onChange={(event) => handleCustomerChange(row.id, "phone", event.target.value)} /></td>
+                        <td><input className={`db-table-input ${includesKeyword(row.address, searchKeyword) ? "search-hit-input" : ""}`} value={row.address} onChange={(event) => handleCustomerChange(row.id, "address", event.target.value)} /></td>
+                        <td><input className={`db-table-input ${includesKeyword(row.defaultLogistics, searchKeyword) ? "search-hit-input" : ""}`} value={row.defaultLogistics} onChange={(event) => handleCustomerChange(row.id, "defaultLogistics", event.target.value)} /></td>
+                        <td><input className={`db-table-input ${includesKeyword(row.note, searchKeyword) ? "search-hit-input" : ""}`} value={row.note} onChange={(event) => handleCustomerChange(row.id, "note", event.target.value)} /></td>
                         <td><button className="delete-button delete-button--table" type="button" onClick={() => handleDeleteCustomer(row.id)}>删除</button></td>
                       </tr>
                     ))}
@@ -468,13 +452,11 @@ export function DatabaseManagerPage() {
 
               <div className="price-group-list">
                 {filteredCustomerPriceGroups.map((group) => {
-                  const sortedPrices = [...group.prices].sort((left, right) => compareModelCode(left.modelCode, right.modelCode));
-
                   return (
-                    <div className="price-group-card" key={group.id}>
+                    <div className={`price-group-card ${includesKeyword([group.customerName, ...group.prices.map((entry) => `${entry.modelCode} ${entry.unitPrice}`)].join(" "), searchKeyword) ? "search-hit-card" : ""}`} key={group.id}>
                       <div className="price-group-card__head">
                         <input
-                          className="field-input price-group-card__customer"
+                          className={`field-input price-group-card__customer ${includesKeyword(group.customerName, searchKeyword) ? "search-hit-input" : ""}`}
                           placeholder="客户名"
                           value={group.customerName}
                           onChange={(event) => handleCustomerGroupChange(group.id, event.target.value)}
@@ -499,10 +481,10 @@ export function DatabaseManagerPage() {
                             </tr>
                           </thead>
                           <tbody>
-                            {sortedPrices.map((entry) => (
-                              <tr key={entry.id}>
-                                <td><input className="db-table-input" value={entry.modelCode} onChange={(event) => handleCustomerPriceEntryChange(group.id, entry.id, "modelCode", event.target.value)} /></td>
-                                <td><input className="db-table-input" inputMode="decimal" value={entry.unitPrice} onChange={(event) => handleCustomerPriceEntryChange(group.id, entry.id, "unitPrice", event.target.value)} /></td>
+                            {group.prices.map((entry) => (
+                              <tr key={entry.id} className={includesKeyword([entry.modelCode, entry.unitPrice].join(" "), searchKeyword) ? "search-hit-row" : ""}>
+                                <td><input className={`db-table-input ${includesKeyword(entry.modelCode, searchKeyword) ? "search-hit-input" : ""}`} value={entry.modelCode} onChange={(event) => handleCustomerPriceEntryChange(group.id, entry.id, "modelCode", event.target.value)} /></td>
+                                <td><input className={`db-table-input ${includesKeyword(entry.unitPrice, searchKeyword) ? "search-hit-input" : ""}`} inputMode="decimal" value={entry.unitPrice} onChange={(event) => handleCustomerPriceEntryChange(group.id, entry.id, "unitPrice", event.target.value)} /></td>
                                 <td><button className="delete-button delete-button--table" type="button" onClick={() => handleDeleteCustomerPriceEntry(group.id, entry.id)}>删除</button></td>
                               </tr>
                             ))}
@@ -536,9 +518,9 @@ export function DatabaseManagerPage() {
                   </thead>
                   <tbody>
                     {filteredDefaultPrices.map((row) => (
-                      <tr key={row.id}>
-                        <td><input className="db-table-input" value={row.modelCode} onChange={(event) => handleDefaultPriceChange(row.id, "modelCode", event.target.value)} /></td>
-                        <td><input className="db-table-input" inputMode="decimal" value={row.unitPrice} onChange={(event) => handleDefaultPriceChange(row.id, "unitPrice", event.target.value)} /></td>
+                      <tr key={row.id} className={includesKeyword([row.modelCode, row.unitPrice].join(" "), searchKeyword) ? "search-hit-row" : ""}>
+                        <td><input className={`db-table-input ${includesKeyword(row.modelCode, searchKeyword) ? "search-hit-input" : ""}`} value={row.modelCode} onChange={(event) => handleDefaultPriceChange(row.id, "modelCode", event.target.value)} /></td>
+                        <td><input className={`db-table-input ${includesKeyword(row.unitPrice, searchKeyword) ? "search-hit-input" : ""}`} inputMode="decimal" value={row.unitPrice} onChange={(event) => handleDefaultPriceChange(row.id, "unitPrice", event.target.value)} /></td>
                         <td><button className="delete-button delete-button--table" type="button" onClick={() => handleDeleteDefaultPrice(row.id)}>删除</button></td>
                       </tr>
                     ))}
@@ -564,6 +546,19 @@ export function DatabaseManagerPage() {
     </main>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

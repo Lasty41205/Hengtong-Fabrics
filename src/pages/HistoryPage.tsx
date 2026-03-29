@@ -1,21 +1,39 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { TopBar } from "../components/TopBar";
-import { loadHistoryRecords } from "../historyStore";
+import { buildDateSearchAliases, HighlightedText, includesKeyword } from "../components/HighlightedText";
+import { formatHistoryDate, loadHistoryRecords } from "../historyStore";
 
 type SortMode = "recent" | "customer";
 
+const buildHistorySearchText = (record: ReturnType<typeof loadHistoryRecords>[number]) =>
+  [
+    buildDateSearchAliases(record.createdAt),
+    record.customer,
+    record.phone,
+    record.address,
+    record.logistics,
+    record.remark,
+    record.rawInput,
+    record.totalAmount,
+    ...record.items.flatMap((item) => [item.nameSpec, item.modelCode, item.quantity, item.unitPrice, item.amount])
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toUpperCase();
+
 export function HistoryPage() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const routeState = location.state as { activeRecordId?: string } | null;
   const [sortMode, setSortMode] = useState<SortMode>("recent");
   const [searchKeyword, setSearchKeyword] = useState("");
-  const [activeRecordId, setActiveRecordId] = useState("");
+  const [activeRecordId, setActiveRecordId] = useState(routeState?.activeRecordId ?? "");
   const records = useMemo(() => loadHistoryRecords(), []);
 
   const filteredRecords = useMemo(() => {
-    const keyword = searchKeyword.trim().toUpperCase();
-    const baseRecords = keyword
-      ? records.filter((record) => record.customer.toUpperCase().includes(keyword))
+    const baseRecords = searchKeyword.trim()
+      ? records.filter((record) => includesKeyword(buildHistorySearchText(record), searchKeyword))
       : records;
 
     return [...baseRecords].sort((left, right) => {
@@ -48,13 +66,16 @@ export function HistoryPage() {
               <button className="ghost-button btn-nav-database" type="button" onClick={() => navigate("/database")}>
                 数据库管理
               </button>
+              <button className="ghost-button btn-nav-billing" type="button" onClick={() => navigate("/billing")}>
+                账单
+              </button>
             </div>
           </div>
 
           <div className="history-toolbar">
             <input
               className="field-input history-search-input"
-              placeholder="按客户搜索历史记录"
+              placeholder="按客户、日期、备注或原始报单搜索"
               value={searchKeyword}
               onChange={(event) => setSearchKeyword(event.target.value)}
             />
@@ -93,36 +114,37 @@ export function HistoryPage() {
 
             {filteredRecords.map((record) => {
               const isActive = activeRecordId === record.id;
+              const matched = includesKeyword(buildHistorySearchText(record), searchKeyword);
 
               return (
-                <article className="history-record-card" key={record.id}>
+                <article className={`history-record-card ${matched ? "search-hit-card" : ""}`} key={record.id}>
                   <button
                     type="button"
                     className="history-record-card__summary"
                     onClick={() => setActiveRecordId(isActive ? "" : record.id)}
                   >
                     <div>
-                      <strong>{record.createdAtText}</strong>
-                      <span>{record.customer || "未命名客户"}</span>
+                      <strong><HighlightedText text={formatHistoryDate(record.createdAt)} keyword={searchKeyword} /> <span className="history-time-tail">{record.createdAtText.split(" ")[1] || ""}</span></strong>
+                      <span><HighlightedText text={record.customer || "未命名客户"} keyword={searchKeyword} /></span>
                     </div>
                     <div>
-                      <strong>¥ {record.totalAmount}</strong>
-                      <span>{record.logistics || "未填写货运方式"}</span>
+                      <strong>¥ <HighlightedText text={record.totalAmount} keyword={searchKeyword} /></strong>
+                      <span><HighlightedText text={record.logistics || "未填写货运方式"} keyword={searchKeyword} /></span>
                     </div>
                   </button>
 
                   {isActive ? (
                     <div className="history-record-card__detail">
                       <div className="history-detail-grid">
-                        <div><span>客户</span><strong>{record.customer || "无"}</strong></div>
-                        <div><span>电话</span><strong>{record.phone || "无"}</strong></div>
-                        <div><span>地址</span><strong>{record.address || "无"}</strong></div>
-                        <div><span>货运方式</span><strong>{record.logistics || "无"}</strong></div>
+                        <div><span>客户</span><strong><HighlightedText text={record.customer || "无"} keyword={searchKeyword} /></strong></div>
+                        <div><span>电话</span><strong><HighlightedText text={record.phone || "无"} keyword={searchKeyword} /></strong></div>
+                        <div><span>地址</span><strong><HighlightedText text={record.address || "无"} keyword={searchKeyword} /></strong></div>
+                        <div><span>货运方式</span><strong><HighlightedText text={record.logistics || "无"} keyword={searchKeyword} /></strong></div>
                       </div>
 
                       <div className="history-detail-block">
                         <span className="field-label">原始报单</span>
-                        <pre className="history-raw-input">{record.rawInput || "无"}</pre>
+                        <pre className="history-raw-input"><HighlightedText text={record.rawInput || "无"} keyword={searchKeyword} /></pre>
                       </div>
 
                       <div className="db-table-wrap">
@@ -138,12 +160,12 @@ export function HistoryPage() {
                           </thead>
                           <tbody>
                             {record.items.map((item) => (
-                              <tr key={item.id}>
-                                <td><div className="history-cell-text">{item.nameSpec || "-"}</div></td>
-                                <td><div className="history-cell-text">{item.modelCode || "-"}</div></td>
-                                <td><div className="history-cell-text">{item.quantity || "-"}</div></td>
-                                <td><div className="history-cell-text">{item.unitPrice || "-"}</div></td>
-                                <td><div className="history-cell-text">{item.amount || "-"}</div></td>
+                              <tr key={item.id} className={includesKeyword([item.nameSpec, item.modelCode, item.quantity, item.unitPrice, item.amount].join(" "), searchKeyword) ? "search-hit-row" : ""}>
+                                <td><div className="history-cell-text"><HighlightedText text={item.nameSpec || "-"} keyword={searchKeyword} /></div></td>
+                                <td><div className="history-cell-text"><HighlightedText text={item.modelCode || "-"} keyword={searchKeyword} /></div></td>
+                                <td><div className="history-cell-text"><HighlightedText text={item.quantity || "-"} keyword={searchKeyword} /></div></td>
+                                <td><div className="history-cell-text"><HighlightedText text={item.unitPrice || "-"} keyword={searchKeyword} /></div></td>
+                                <td><div className="history-cell-text"><HighlightedText text={item.amount || "-"} keyword={searchKeyword} /></div></td>
                               </tr>
                             ))}
                           </tbody>
@@ -151,8 +173,8 @@ export function HistoryPage() {
                       </div>
 
                       <div className="history-detail-footer">
-                        <span>备注：{record.remark || "无"}</span>
-                        <strong>合计：¥ {record.totalAmount}</strong>
+                        <span>备注：<HighlightedText text={record.remark || "无"} keyword={searchKeyword} /></span>
+                        <strong>合计：¥ <HighlightedText text={record.totalAmount} keyword={searchKeyword} /></strong>
                       </div>
 
                       <div className="history-detail-actions">
@@ -188,3 +210,7 @@ export function HistoryPage() {
     </main>
   );
 }
+
+
+
+

@@ -12,6 +12,12 @@ import {
 } from "../localDb";
 import { PENDING_HISTORY_ID_KEY, saveHistoryRecord } from "../historyStore";
 import {
+  findAutoBillingRecordByOrderId,
+  getCustomerCurrentBalance,
+  removeAutoBillingRecordByOrderId,
+  upsertAutoBillingRecord
+} from "../billingStore";
+import {
   createEmptyForm,
   createEmptyItem,
   emptyFreightSelection,
@@ -22,7 +28,7 @@ import {
   resolveFreightSelection
 } from "../mockData";
 import { calculateAmount, calculateTotalAmount } from "../orderMath";
-import { HistoryRecord, LocalBusinessDatabase, OrderForm, OrderItem } from "../types";
+import { BillingRecord, HistoryRecord, LocalBusinessDatabase, OrderForm, OrderItem } from "../types";
 import { collectValidationIssues, getInputIssue, parseLocalOrderInput } from "../utils";
 
 const fieldTips = {
@@ -33,6 +39,11 @@ const fieldTips = {
 } as const;
 
 const EDITOR_STATE_KEY = "invoice-editor-state";
+
+const sumMoneyText = (left: string, right: string) => {
+  const next = Number(left || 0) + Number(right || 0);
+  return Number.isFinite(next) ? String(Number(next.toFixed(2))) : "0";
+};
 
 type FocusableElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
 
@@ -48,6 +59,7 @@ type EditorSnapshot = {
   freightSelection: FreightSelectionState;
   hint: string;
   editingHistoryRecordId: string;
+  includeInLedger: boolean;
 };
 
 type EditorRouteState = {
@@ -79,6 +91,7 @@ function normalizeSnapshotForm(value: Partial<OrderForm> | undefined): OrderForm
     remark: value.remark ?? fallback.remark,
     items: items.length > 0 ? items : fallback.items,
     totalAmount: value.totalAmount ?? fallback.totalAmount,
+    billingSummary: value.billingSummary,
     issues: value.issues ?? {}
   };
 }
@@ -103,7 +116,8 @@ function loadEditorSnapshot(): EditorSnapshot {
     hasParsed: false,
     freightSelection: emptyFreightSelection(),
     hint: "当前为 Phase 2 本地数据库版本，优先按客户价和默认价补全。",
-    editingHistoryRecordId: ""
+    editingHistoryRecordId: "",
+    includeInLedger: false
   };
 
   try {
@@ -118,7 +132,8 @@ function loadEditorSnapshot(): EditorSnapshot {
       hasParsed: parsed.hasParsed ?? defaultState.hasParsed,
       freightSelection: normalizeFreightSelection(parsed.freightSelection, form.logistics),
       hint: parsed.hint ?? defaultState.hint,
-      editingHistoryRecordId: parsed.editingHistoryRecordId ?? ""
+      editingHistoryRecordId: parsed.editingHistoryRecordId ?? "",
+      includeInLedger: parsed.includeInLedger ?? false
     };
   } catch {
     return defaultState;
@@ -173,7 +188,8 @@ function buildStateFromHistoryRecord(record: HistoryRecord): EditorSnapshot {
     hasParsed: true,
     freightSelection: resolveFreightSelection(record.logistics),
     hint: "已载入历史记录，可直接修改后重新生成。",
-    editingHistoryRecordId: record.id
+    editingHistoryRecordId: record.id,
+    includeInLedger: false
   };
 }
 
@@ -199,6 +215,7 @@ export function OrderEditorPage() {
   const [hint, setHint] = useState(initialState.hint);
   const [freightSelection, setFreightSelection] = useState<FreightSelectionState>(initialState.freightSelection);
   const [editingHistoryRecordId, setEditingHistoryRecordId] = useState(initialState.editingHistoryRecordId);
+  const [includeInLedger, setIncludeInLedger] = useState(initialState.includeInLedger);
   const [activeFieldKey, setActiveFieldKey] = useState("");
   const [pastedImage, setPastedImage] = useState<PastedImage | null>(null);
 
@@ -210,6 +227,15 @@ export function OrderEditorPage() {
   }, [freightSelection.primary]);
   const showFreightSecondary = freightSelection.primary === "物流" || freightSelection.primary === "快递";
   const showFreightCustomInput = freightSelection.customMode !== "none";
+  const existingAutoBillingRecord = useMemo<BillingRecord | undefined>(
+    () => (editingHistoryRecordId ? findAutoBillingRecordByOrderId(editingHistoryRecordId) : undefined),
+    [editingHistoryRecordId]
+  );
+  const customerHistoricalBalance = useMemo(
+    () => getCustomerCurrentBalance(form.customer, { excludeRelatedOrderId: editingHistoryRecordId || undefined }),
+    [editingHistoryRecordId, form.customer]
+  );
+  const shouldShowBillingPrompt = Boolean(existingAutoBillingRecord) || Number(customerHistoricalBalance || 0) !== 0;
 
   useEffect(() => {
     const snapshot: EditorSnapshot = {
@@ -218,11 +244,20 @@ export function OrderEditorPage() {
       hasParsed,
       freightSelection,
       hint,
-      editingHistoryRecordId
+      editingHistoryRecordId,
+      includeInLedger
     };
 
     sessionStorage.setItem(EDITOR_STATE_KEY, JSON.stringify(snapshot));
-  }, [editingHistoryRecordId, form, freightSelection, hasParsed, hint, rawInput]);
+  }, [editingHistoryRecordId, form, freightSelection, hasParsed, hint, includeInLedger, rawInput]);
+
+  useEffect(() => {
+    const shouldIncludeCurrentOrder = Boolean(
+      existingAutoBillingRecord &&
+        existingAutoBillingRecord.customerName.trim().toUpperCase() === form.customer.trim().toUpperCase()
+    );
+    setIncludeInLedger(shouldIncludeCurrentOrder);
+  }, [existingAutoBillingRecord, form.customer]);
 
   useEffect(() => {
     return () => {
@@ -595,23 +630,64 @@ export function OrderEditorPage() {
       setHint(nextHint);
     }
 
-    const historyRecord = saveHistoryRecord(rawInput, form, editingHistoryRecordId || undefined);
+    const previewOrder: OrderForm = includeInLedger
+      ? {
+          ...form,
+          billingSummary: {
+            includeInLedger: true,
+            previousBalance: customerHistoricalBalance,
+            currentAmount: form.totalAmount,
+            totalAmount: sumMoneyText(customerHistoricalBalance, form.totalAmount),
+            relatedOrderId: editingHistoryRecordId
+          }
+        }
+      : {
+          ...form,
+          billingSummary: undefined
+        };
+
+    const historyRecord = saveHistoryRecord(rawInput, previewOrder, editingHistoryRecordId || undefined);
     setEditingHistoryRecordId(historyRecord.id);
+
+    if (includeInLedger) {
+      upsertAutoBillingRecord({
+        customerName: form.customer,
+        amount: form.totalAmount,
+        relatedOrderId: historyRecord.id,
+        note: "订单累计到账单：¥ " + form.totalAmount,
+        orderInfo: {
+          rawInput,
+          customer: form.customer,
+          totalAmount: form.totalAmount,
+          createdAtText: historyRecord.createdAtText
+        }
+      });
+      previewOrder.billingSummary = {
+        includeInLedger: true,
+        previousBalance: customerHistoricalBalance,
+        currentAmount: form.totalAmount,
+        totalAmount: sumMoneyText(customerHistoricalBalance, form.totalAmount),
+        relatedOrderId: historyRecord.id
+      };
+    } else {
+      removeAutoBillingRecordByOrderId(historyRecord.id);
+    }
+
     sessionStorage.setItem(PENDING_HISTORY_ID_KEY, historyRecord.id);
 
     const snapshot: EditorSnapshot = {
       rawInput,
-      form,
+      form: previewOrder,
       hasParsed: true,
       freightSelection,
       hint: nextHint,
-      editingHistoryRecordId: historyRecord.id
+      editingHistoryRecordId: historyRecord.id,
+      includeInLedger
     };
 
     sessionStorage.setItem(EDITOR_STATE_KEY, JSON.stringify(snapshot));
-    sessionStorage.setItem(EDITOR_STATE_KEY, JSON.stringify(snapshot));
-    sessionStorage.setItem("invoice-preview-order", JSON.stringify(form));
-    navigate("/preview", { state: { order: form } });
+    sessionStorage.setItem("invoice-preview-order", JSON.stringify(previewOrder));
+    navigate("/preview", { state: { order: previewOrder } });
   };
 
   const customerIssue = getInputIssue(form.issues.customer, form.customer, fieldTips.customer);
@@ -625,23 +701,27 @@ export function OrderEditorPage() {
         <TopBar title="订单编辑" rightText="Phase 2 本地库" />
 
         <section className="hero-card">
-          <div className="hero-card__heading hero-card__heading--stack hero-card__heading--mobile-actions">
+          <div className="hero-card__heading hero-card__heading--stack hero-card__heading--editor-title">
             <div>
               <h2>快速录入报单</h2>
               <span className="status-chip">客户价优先</span>
             </div>
-            <div className="hero-card__quick-links">
-              <button className="ghost-button btn-nav-history" type="button" onClick={() => navigate("/history")}>
-                历史记录
-              </button>
-              <button className="ghost-button btn-nav-database" type="button" onClick={() => navigate("/database")}>
-                数据库管理
-              </button>
-            </div>
+          </div>
+
+          <div className="hero-card__quick-links hero-card__quick-links--editor">
+            <button className="ghost-button btn-nav-history" type="button" onClick={() => navigate("/history")}>
+              历史记录
+            </button>
+            <button className="ghost-button btn-nav-database" type="button" onClick={() => navigate("/database")}>
+              数据库管理
+            </button>
+            <button className="ghost-button btn-nav-billing" type="button" onClick={() => navigate("/billing")}>
+              账单
+            </button>
           </div>
 
           <textarea
-            className="prompt-box"
+            className="prompt-box prompt-box--compact-editor"
             placeholder="请输入报单内容"
             value={rawInput}
             onChange={(event) => setRawInput(event.target.value)}
@@ -787,13 +867,30 @@ export function OrderEditorPage() {
               <label className="field-block field-block--full">
                 <span className="field-label">备注（可选）</span>
                 <textarea
-                  className="field-textarea"
-                  rows={3}
+                  className="field-textarea field-textarea--compact"
+                  rows={1}
                   value={form.remark}
                   onChange={(event) => updateFormField("remark", event.target.value)}
                 />
               </label>
             </div>
+
+            {shouldShowBillingPrompt ? (
+              <div className="billing-alert-card">
+                <div className="billing-alert-card__summary">
+                  <strong>历史记账：¥ {customerHistoricalBalance}</strong>
+                  <label className="billing-alert-card__check">
+                    <input
+                      type="checkbox"
+                      checked={includeInLedger}
+                      onChange={(event) => setIncludeInLedger(event.target.checked)}
+                    />
+                    <span>是否累计本次账单</span>
+                  </label>
+                </div>
+                <p>默认不累计，只有勾选后，本次金额才会写入历史账单余额。</p>
+              </div>
+            ) : null}
 
             <div className="items-panel" ref={itemsPanelRef}>
               <div className="section-title-row">
@@ -902,9 +999,17 @@ export function OrderEditorPage() {
                 })}
               </div>
 
-              <div className="total-box">
-                <span>合计金额</span>
-                <strong>¥ {form.totalAmount || "0"}</strong>
+              <div className="total-box total-box--stack">
+                <div className="total-box__line">
+                  <span>本次合计金额</span>
+                  <strong className="total-box__minor">¥ {form.totalAmount || "0"}</strong>
+                </div>
+                {includeInLedger && shouldShowBillingPrompt ? (
+                  <div className="total-box__line total-box__line--emphasis">
+                    <span>累计后的合计金额</span>
+                    <strong>¥ {sumMoneyText(customerHistoricalBalance, form.totalAmount || "0")}</strong>
+                  </div>
+                ) : null}
               </div>
             </div>
           </section>
@@ -925,5 +1030,8 @@ export function OrderEditorPage() {
     </main>
   );
 }
+
+
+
 
 
