@@ -95,15 +95,24 @@ export const sortDatabase = (database: LocalBusinessDatabase): LocalBusinessData
 
 function sanitizeCustomers(records: CustomerRecord[] | undefined): CustomerRecord[] {
   return sortCustomers(
-    (records ?? []).map((record) => ({
-      id: record.id || crypto.randomUUID(),
-      name: normalizeSpaces(record.name || ""),
-      phone: normalizeSpaces(record.phone || ""),
-      address: normalizeSpaces(record.address || ""),
-      defaultLogistics: normalizeSpaces(record.defaultLogistics || ""),
-      note: normalizeSpaces(record.note || ""),
-      updatedAt: record.updatedAt || nowText()
-    }))
+    (records ?? []).map((record) => {
+      const updatedAt = record.updatedAt || nowText();
+
+      return {
+        id: record.id || crypto.randomUUID(),
+        name: normalizeSpaces(record.name || ""),
+        phone: normalizeSpaces(record.phone || ""),
+        address: normalizeSpaces(record.address || ""),
+        defaultLogistics: normalizeSpaces(record.defaultLogistics || ""),
+        note: normalizeSpaces(record.note || ""),
+        createdAt: record.createdAt || updatedAt,
+        updatedAt,
+        createdBy: record.createdBy,
+        updatedBy: record.updatedBy,
+        createdByName: record.createdByName,
+        updatedByName: record.updatedByName
+      } satisfies CustomerRecord;
+    })
   );
 }
 
@@ -416,7 +425,10 @@ export function syncOrderToDatabase(
       address: normalizeSpaces(form.address),
       defaultLogistics: normalizeSpaces(form.logistics),
       note: "",
-      updatedAt: now
+      createdAt: now,
+      updatedAt: now,
+      createdByName: "本地流程",
+      updatedByName: "本地流程"
     });
     changes.push(`新增客户「${customerName}」`);
   } else {
@@ -425,7 +437,8 @@ export function syncOrderToDatabase(
       phone: customer.phone || normalizeSpaces(form.phone),
       address: customer.address || normalizeSpaces(form.address),
       defaultLogistics: customer.defaultLogistics || normalizeSpaces(form.logistics),
-      updatedAt: now
+      updatedAt: now,
+      updatedByName: "本地流程"
     };
 
     if (
@@ -500,5 +513,6 @@ export function syncOrderToDatabase(
     summary: `已写回数据库：${changes.join("；")}。`
   };
 }
+
 
 

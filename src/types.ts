@@ -12,6 +12,17 @@ export type PriceSource = "customer" | "default" | "manual" | "none";
 export type BillingRecordType = "auto_add" | "manual_add" | "manual_payment";
 export type BillingPaymentMethod = "微信" | "支付宝" | "现金" | "银行收款码" | "其他";
 
+export type UserRole = "admin" | "staff";
+
+export type AppProfile = {
+  id: string;
+  email: string;
+  displayName: string;
+  role: UserRole;
+  isActive: boolean;
+  createdAt: string;
+};
+
 export type BillingOrderSnapshot = {
   rawInput: string;
   customer: string;
@@ -30,13 +41,19 @@ export type BillingSummary = {
 export type BillingRecord = {
   id: string;
   customerName: string;
+  customerId?: string;
   type: BillingRecordType;
   dateTime: string;
   amount: string;
   note: string;
   paymentMethod: BillingPaymentMethod | "";
   relatedOrderId: string;
+  invoiceId?: string;
   orderInfo?: BillingOrderSnapshot;
+  createdAt?: string;
+  updatedAt?: string;
+  createdByName?: string;
+  updatedByName?: string;
 };
 
 export type BillingCustomerSummary = {
@@ -76,7 +93,12 @@ export type CustomerRecord = {
   address: string;
   defaultLogistics: string;
   note: string;
+  createdAt?: string;
   updatedAt: string;
+  createdBy?: string;
+  updatedBy?: string;
+  createdByName?: string;
+  updatedByName?: string;
 };
 
 export type CustomerPriceEntry = {
@@ -120,6 +142,8 @@ export type DatabaseSyncResult = {
   summary: string;
 };
 
+export type CustomerDataSource = "local" | "supabase";
+
 export type HistoryItemSnapshot = {
   id: string;
   nameSpec: string;
@@ -130,10 +154,27 @@ export type HistoryItemSnapshot = {
   priceSource: PriceSource;
 };
 
+export type HistoryListRecord = {
+  id: string;
+  createdAt: string;
+  createdAtText: string;
+  updatedAt?: string;
+  updatedAtText?: string;
+  rawInput: string;
+  customer: string;
+  logistics: string;
+  remark: string;
+  totalAmount: string;
+  createdByName?: string;
+  updatedByName?: string;
+};
+
 export type HistoryRecord = {
   id: string;
   createdAt: string;
   createdAtText: string;
+  updatedAt?: string;
+  updatedAtText?: string;
   rawInput: string;
   customer: string;
   phone: string;
@@ -143,4 +184,7 @@ export type HistoryRecord = {
   items: HistoryItemSnapshot[];
   totalAmount: string;
   previewImageDataUrl: string;
+  createdByName?: string;
+  updatedByName?: string;
 };
+

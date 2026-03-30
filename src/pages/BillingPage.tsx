@@ -1,15 +1,16 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { TopBar } from "../components/TopBar";
 import { buildDateSearchAliases, HighlightedText, includesKeyword } from "../components/HighlightedText";
-import {
-  deleteBillingRecord,
-  getBillingSummaries,
-  getBillingTypeLabel,
-  loadBillingRecords,
-  upsertBillingRecord
-} from "../billingStore";
 import { formatHistoryDate, formatHistoryTime } from "../historyStore";
+import {
+  calculateBillingSummaries,
+  createBillingEntry,
+  deleteBillingEntryById,
+  getBillingTypeLabel,
+  listBillingEntries,
+  updateBillingEntry
+} from "../services/billingEntries";
 import { BillingPaymentMethod, BillingRecord, BillingRecordType } from "../types";
 
 const paymentMethods: BillingPaymentMethod[] = ["微信", "支付宝", "现金", "银行收款码", "其他"];
@@ -51,7 +52,9 @@ const buildBillingRecordSearchText = (record: BillingRecord) =>
     getBillingTypeLabel(record.type),
     record.orderInfo?.rawInput,
     record.orderInfo?.customer,
-record.orderInfo?.createdAtText ? buildDateSearchAliases(record.orderInfo.createdAtText) : ""
+    record.createdByName,
+    record.updatedByName,
+    record.orderInfo?.createdAtText ? buildDateSearchAliases(record.orderInfo.createdAtText) : ""
   ]
     .filter(Boolean)
     .join(" ")
@@ -59,21 +62,49 @@ record.orderInfo?.createdAtText ? buildDateSearchAliases(record.orderInfo.create
 
 export function BillingPage() {
   const navigate = useNavigate();
-  const [records, setRecords] = useState<BillingRecord[]>(() => loadBillingRecords());
+  const [records, setRecords] = useState<BillingRecord[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [searchKeyword, setSearchKeyword] = useState("");
   const [detailSearchKeyword, setDetailSearchKeyword] = useState("");
   const [activeCustomerName, setActiveCustomerName] = useState("");
   const [draftRecord, setDraftRecord] = useState(createDraftRecord("manual_payment"));
   const [isCreatingCustomer, setIsCreatingCustomer] = useState(false);
-  const [notice, setNotice] = useState("这里优先看客户当前欠账，再进入详情管理具体流水。余额会根据流水自动重算。");
+  const [notice, setNotice] = useState("这里显示的是 Supabase 云端账单，余额会根据共享流水自动重算。");
 
-  const refreshRecords = (message: string) => {
-    setRecords(loadBillingRecords());
+  const refreshRecords = async (message: string) => {
+    const nextRecords = await listBillingEntries();
+    setRecords(nextRecords);
     setNotice(message);
   };
 
-  const summaries = useMemo(() => getBillingSummaries(), [records]);
-  
+  useEffect(() => {
+    let active = true;
+
+    const loadRecords = async () => {
+      try {
+        setIsLoading(true);
+        const nextRecords = await listBillingEntries();
+        if (!active) return;
+        setRecords(nextRecords);
+        setNotice("云端账单已加载完成，不同店员会看到同一套欠账流水。");
+      } catch (error) {
+        if (!active) return;
+        setNotice(error instanceof Error ? error.message : "云端账单读取失败，请稍后再试。");
+      } finally {
+        if (active) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void loadRecords();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const summaries = useMemo(() => calculateBillingSummaries(records), [records]);
 
   const filteredSummaries = useMemo(() => {
     if (!searchKeyword.trim()) return summaries;
@@ -143,21 +174,32 @@ export function BillingPage() {
     setNotice("已返回欠账总览。可以继续搜索客户、日期或备注信息。");
   };
 
-  const persistRecord = (recordId: string) => {
+  const persistRecord = async (recordId: string) => {
     const record = records.find((item) => item.id === recordId);
     if (!record) return;
 
     if (!record.customerName.trim() || !record.amount.trim()) return;
     if (record.type === "manual_payment" && !record.paymentMethod) return;
 
-    upsertBillingRecord({
-      ...record,
-      dateTime: toIsoDateTime(record.dateTime)
-    });
-    refreshRecords(`已更新账单流水：${record.customerName}`);
+    try {
+      await updateBillingEntry(record.id, {
+        id: record.id,
+        customerName: record.customerName,
+        customerId: record.customerId,
+        type: record.type,
+        dateTime: toIsoDateTime(record.dateTime),
+        amount: record.amount,
+        note: record.note,
+        paymentMethod: record.paymentMethod,
+        relatedOrderId: record.relatedOrderId
+      });
+      await refreshRecords(`已更新账单流水：${record.customerName}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "账单更新失败，请稍后再试。");
+    }
   };
 
-  const handleDraftSubmit = () => {
+  const handleDraftSubmit = async () => {
     const customerName = (activeCustomerName || draftRecord.customerName).trim();
 
     if (!customerName || !draftRecord.amount.trim()) {
@@ -170,21 +212,24 @@ export function BillingPage() {
       return;
     }
 
-    upsertBillingRecord({
-      customerName,
-      type: draftRecord.type,
-      dateTime: toIsoDateTime(draftRecord.dateTime),
-      amount: draftRecord.amount,
-      note: draftRecord.note,
-      paymentMethod: draftRecord.type === "manual_payment" ? draftRecord.paymentMethod : "",
-      relatedOrderId: ""
-    });
+    try {
+      await createBillingEntry({
+        customerName,
+        type: draftRecord.type,
+        dateTime: toIsoDateTime(draftRecord.dateTime),
+        amount: draftRecord.amount,
+        note: draftRecord.note,
+        paymentMethod: draftRecord.type === "manual_payment" ? draftRecord.paymentMethod : ""
+      });
 
-    setDraftRecord(createDraftRecord(isCreatingCustomer ? "manual_add" : draftRecord.type));
-    setActiveCustomerName(customerName);
-    setIsCreatingCustomer(false);
-    setDetailSearchKeyword("");
-    refreshRecords(`已保存${draftRecord.type === "manual_payment" ? "已支付" : "记账"}流水。`);
+      setDraftRecord(createDraftRecord(isCreatingCustomer ? "manual_add" : draftRecord.type));
+      setActiveCustomerName(customerName);
+      setIsCreatingCustomer(false);
+      setDetailSearchKeyword("");
+      await refreshRecords(`已保存${draftRecord.type === "manual_payment" ? "已支付" : "记账"}流水。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "账单保存失败，请稍后再试。");
+    }
   };
 
   const handleRecordFieldChange = (recordId: string, field: keyof BillingRecord, value: string) => {
@@ -200,11 +245,16 @@ export function BillingPage() {
     );
   };
 
-  const handleDeleteRecord = (recordId: string) => {
+  const handleDeleteRecord = async (recordId: string) => {
     const confirmed = window.confirm("确认删除这条账单流水吗？删除后欠账会自动重算。");
     if (!confirmed) return;
-    deleteBillingRecord(recordId);
-    refreshRecords("账单流水已删除，欠账已自动重算。");
+
+    try {
+      await deleteBillingEntryById(recordId);
+      await refreshRecords("账单流水已删除，欠账已自动重算。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "账单删除失败，请稍后再试。");
+    }
   };
 
   const handleOpenRelatedHistory = (record: BillingRecord) => {
@@ -215,7 +265,7 @@ export function BillingPage() {
   return (
     <main className="page-shell">
       <div className="page phone-frame phone-frame--database">
-        <TopBar title="账单" rightText="本地账单" />
+        <TopBar title="账单" rightText="云端账单" />
 
         <section className="hero-card">
           <div className="hero-card__heading hero-card__heading--stack">
@@ -273,10 +323,15 @@ export function BillingPage() {
               </div>
             </div>
 
-            {filteredSummaries.length === 0 ? (
+            {isLoading ? (
+              <div className="empty-card history-empty-card">
+                <h2>正在读取云端账单</h2>
+                <p>请稍等，系统正在加载全部店员共享的账单流水。</p>
+              </div>
+            ) : filteredSummaries.length === 0 ? (
               <div className="empty-card history-empty-card">
                 <h2>暂无账单记录</h2>
-                <p>还没有任何客户欠账流水，先点右上角 + 录入新客户第一笔欠账。</p>
+                <p>云端账单现在还是空的，先点右上角 + 录入第一笔欠账。</p>
               </div>
             ) : (
               <div className="billing-overview-grid">
@@ -476,7 +531,7 @@ export function BillingPage() {
                               className={`field-input field-select ${includesKeyword(record.paymentMethod, detailSearchKeyword) ? "search-hit-input" : ""}`}
                               value={record.paymentMethod}
                               onChange={(event) => handleRecordFieldChange(record.id, "paymentMethod", event.target.value)}
-                              onBlur={() => persistRecord(record.id)}
+                              onBlur={() => void persistRecord(record.id)}
                             >
                               <option value="">请选择支付方式</option>
                               {paymentMethods.map((item) => (
@@ -495,7 +550,7 @@ export function BillingPage() {
                               className={`field-input ${includesKeyword(record.note, detailSearchKeyword) ? "search-hit-input" : ""}`}
                               value={record.note}
                               onChange={(event) => handleRecordFieldChange(record.id, "note", event.target.value)}
-                              onBlur={() => persistRecord(record.id)}
+                              onBlur={() => void persistRecord(record.id)}
                             />
                           </label>
                         ) : null}
@@ -514,7 +569,7 @@ export function BillingPage() {
                       ) : null}
 
                       <div className="billing-card-actions">
-                        <button className="delete-button delete-button--table" type="button" onClick={() => handleDeleteRecord(record.id)}>
+                        <button className="delete-button delete-button--table" type="button" onClick={() => void handleDeleteRecord(record.id)}>
                           删除
                         </button>
                       </div>
@@ -533,7 +588,4 @@ export function BillingPage() {
     </main>
   );
 }
-
-
-
 

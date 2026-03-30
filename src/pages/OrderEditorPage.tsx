@@ -10,13 +10,19 @@ import {
   saveBusinessDatabase,
   syncOrderToDatabase
 } from "../localDb";
-import { PENDING_HISTORY_ID_KEY, saveHistoryRecord } from "../historyStore";
 import {
-  findAutoBillingRecordByOrderId,
-  getCustomerCurrentBalance,
-  removeAutoBillingRecordByOrderId,
-  upsertAutoBillingRecord
-} from "../billingStore";
+  loadDatabaseWithCloudCustomers,
+  syncOrderCustomerToCloud
+} from "../services/businessDatabase";
+import { PENDING_HISTORY_ID_KEY, saveHistoryRecord } from "../historyStore";
+import { saveInvoiceHistoryRecord } from "../services/invoices";
+import {
+  calculateCustomerCurrentBalance,
+  listBillingEntries,
+  removeAutoBillingEntryByInvoiceId,
+  saveAutoBillingEntryForInvoice
+} from "../services/billingEntries";
+import { saveCustomerPriceGroups, saveDefaultPrices } from "../services/priceTables";
 import {
   createEmptyForm,
   createEmptyItem,
@@ -59,6 +65,8 @@ type EditorSnapshot = {
   freightSelection: FreightSelectionState;
   hint: string;
   editingHistoryRecordId: string;
+  historyEditMode: boolean;
+  persistCustomerDefaults: boolean;
   includeInLedger: boolean;
 };
 
@@ -117,6 +125,8 @@ function loadEditorSnapshot(): EditorSnapshot {
     freightSelection: emptyFreightSelection(),
     hint: "当前为 Phase 2 本地数据库版本，优先按客户价和默认价补全。",
     editingHistoryRecordId: "",
+    historyEditMode: false,
+    persistCustomerDefaults: false,
     includeInLedger: false
   };
 
@@ -126,13 +136,16 @@ function loadEditorSnapshot(): EditorSnapshot {
 
     const parsed = JSON.parse(saved) as Partial<EditorSnapshot>;
     const form = normalizeSnapshotForm(parsed.form);
+    const historyEditMode = parsed.historyEditMode ?? false;
     return {
       rawInput: parsed.rawInput ?? defaultState.rawInput,
       form,
       hasParsed: parsed.hasParsed ?? defaultState.hasParsed,
       freightSelection: normalizeFreightSelection(parsed.freightSelection, form.logistics),
       hint: parsed.hint ?? defaultState.hint,
-      editingHistoryRecordId: parsed.editingHistoryRecordId ?? "",
+      editingHistoryRecordId: historyEditMode ? parsed.editingHistoryRecordId ?? "" : "",
+      historyEditMode,
+      persistCustomerDefaults: parsed.persistCustomerDefaults ?? false,
       includeInLedger: parsed.includeInLedger ?? false
     };
   } catch {
@@ -189,6 +202,8 @@ function buildStateFromHistoryRecord(record: HistoryRecord): EditorSnapshot {
     freightSelection: resolveFreightSelection(record.logistics),
     hint: "已载入历史记录，可直接修改后重新生成。",
     editingHistoryRecordId: record.id,
+    historyEditMode: true,
+    persistCustomerDefaults: false,
     includeInLedger: false
   };
 }
@@ -207,6 +222,7 @@ export function OrderEditorPage() {
     [routeHistoryRecord]
   );
   const [database, setDatabase] = useState(initialDatabase);
+  const [customerSource, setCustomerSource] = useState<"local" | "supabase">("local");
   const [rawInput, setRawInput] = useState(initialState.rawInput);
   const [form, setForm] = useState<OrderForm>(() =>
     routeHistoryRecord ? initialState.form : hydrateFormWithDatabase(initialState.form, initialDatabase)
@@ -215,11 +231,15 @@ export function OrderEditorPage() {
   const [hint, setHint] = useState(initialState.hint);
   const [freightSelection, setFreightSelection] = useState<FreightSelectionState>(initialState.freightSelection);
   const [editingHistoryRecordId, setEditingHistoryRecordId] = useState(initialState.editingHistoryRecordId);
+  const [historyEditMode, setHistoryEditMode] = useState(initialState.historyEditMode);
+  const [persistCustomerDefaults, setPersistCustomerDefaults] = useState(initialState.persistCustomerDefaults);
   const [includeInLedger, setIncludeInLedger] = useState(initialState.includeInLedger);
   const [activeFieldKey, setActiveFieldKey] = useState("");
   const [pastedImage, setPastedImage] = useState<PastedImage | null>(null);
+  const [billingRecords, setBillingRecords] = useState<BillingRecord[]>([]);
 
   const invalidCount = useMemo(() => collectValidationIssues(form).length, [form]);
+  const activeHistoryRecordId = historyEditMode ? editingHistoryRecordId : "";
   const secondaryFreightOptions = useMemo(() => {
     if (freightSelection.primary === "物流") return logisticsCarrierOptions;
     if (freightSelection.primary === "快递") return expressCarrierOptions;
@@ -228,12 +248,12 @@ export function OrderEditorPage() {
   const showFreightSecondary = freightSelection.primary === "物流" || freightSelection.primary === "快递";
   const showFreightCustomInput = freightSelection.customMode !== "none";
   const existingAutoBillingRecord = useMemo<BillingRecord | undefined>(
-    () => (editingHistoryRecordId ? findAutoBillingRecordByOrderId(editingHistoryRecordId) : undefined),
-    [editingHistoryRecordId]
+    () => billingRecords.find((record) => record.type === "auto_add" && record.relatedOrderId === activeHistoryRecordId),
+    [activeHistoryRecordId, billingRecords]
   );
   const customerHistoricalBalance = useMemo(
-    () => getCustomerCurrentBalance(form.customer, { excludeRelatedOrderId: editingHistoryRecordId || undefined }),
-    [editingHistoryRecordId, form.customer]
+    () => calculateCustomerCurrentBalance(billingRecords, form.customer, { excludeRelatedOrderId: activeHistoryRecordId || undefined }),
+    [activeHistoryRecordId, billingRecords, form.customer]
   );
   const shouldShowBillingPrompt = Boolean(existingAutoBillingRecord) || Number(customerHistoricalBalance || 0) !== 0;
 
@@ -245,11 +265,13 @@ export function OrderEditorPage() {
       freightSelection,
       hint,
       editingHistoryRecordId,
+      historyEditMode,
+      persistCustomerDefaults,
       includeInLedger
     };
 
     sessionStorage.setItem(EDITOR_STATE_KEY, JSON.stringify(snapshot));
-  }, [editingHistoryRecordId, form, freightSelection, hasParsed, hint, includeInLedger, rawInput]);
+  }, [editingHistoryRecordId, form, freightSelection, hasParsed, hint, historyEditMode, persistCustomerDefaults, includeInLedger, rawInput]);
 
   useEffect(() => {
     const shouldIncludeCurrentOrder = Boolean(
@@ -266,6 +288,57 @@ export function OrderEditorPage() {
       }
     };
   }, [pastedImage]);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadCloudCustomers = async () => {
+      const result = await loadDatabaseWithCloudCustomers(initialDatabase);
+      if (!active) return;
+
+      setDatabase(result.database);
+      setCustomerSource(result.source);
+      setForm((current) => hydrateFormWithDatabase(current, result.database));
+      setHint((current) => {
+        if (result.source === "supabase") {
+          return "已连接云端数据库，客户资料和价格表会在全部店员之间共享。";
+        }
+
+        if (result.usedLocalFallback) {
+          return "云端 customers 还是空的，当前先沿用本地数据库。";
+        }
+
+        return current;
+      });
+    };
+
+    void loadCloudCustomers();
+
+    return () => {
+      active = false;
+    };
+  }, [initialDatabase]);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadCloudBilling = async () => {
+      try {
+        const records = await listBillingEntries();
+        if (!active) return;
+        setBillingRecords(records);
+      } catch {
+        if (!active) return;
+        setBillingRecords([]);
+      }
+    };
+
+    void loadCloudBilling();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const registerFieldRef = (key: string) => (node: FocusableElement | null) => {
     fieldRefs.current[key] = node;
@@ -447,6 +520,22 @@ export function OrderEditorPage() {
     setHint("已移除粘贴图片。");
   };
 
+  const startNewHistoryDraft = () => {
+    if (!historyEditMode && !editingHistoryRecordId) return;
+    setEditingHistoryRecordId("");
+    setHistoryEditMode(false);
+    sessionStorage.removeItem(PENDING_HISTORY_ID_KEY);
+  };
+
+  const handleRawInputChange = (value: string) => {
+    if (historyEditMode) {
+      startNewHistoryDraft();
+      setHint("已切换为新报单，本次生成会新增一条历史记录。");
+    }
+
+    setRawInput(value);
+  };
+
   const handleParse = () => {
     const parsed = parseLocalOrderInput(rawInput, database);
     setForm(parsed.form);
@@ -467,6 +556,8 @@ export function OrderEditorPage() {
     setHasParsed(false);
     setFreightSelection(emptyFreightSelection());
     setEditingHistoryRecordId("");
+    setHistoryEditMode(false);
+    setPersistCustomerDefaults(false);
     setActiveFieldKey("");
     setPastedImage((current) => {
       if (current?.url) {
@@ -611,7 +702,7 @@ export function OrderEditorPage() {
     focusFieldByKey(fieldKey);
   };
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
     const issues = collectValidationIssues(form);
 
     if (issues.length > 0) {
@@ -622,12 +713,34 @@ export function OrderEditorPage() {
     }
 
     const syncResult = syncOrderToDatabase(form, database);
-    const nextDatabase = syncResult.changed ? saveBusinessDatabase(syncResult.database) : database;
-    const nextHint = syncResult.changed ? syncResult.summary : hint;
+    let nextDatabase = syncResult.changed ? saveBusinessDatabase(syncResult.database) : database;
+    const pendingCustomerPrices = nextDatabase.customerPrices;
+    const pendingDefaultPrices = nextDatabase.defaultPrices;
+    let nextHint = syncResult.changed ? syncResult.summary : hint;
 
-    if (syncResult.changed) {
-      setDatabase(nextDatabase);
-      setHint(nextHint);
+    try {
+      const cloudSyncResult = await syncOrderCustomerToCloud(nextDatabase, form, {
+        overwriteExisting: persistCustomerDefaults
+      });
+      if (cloudSyncResult.source === "supabase") {
+        nextDatabase = {
+          ...cloudSyncResult.database,
+          customerPrices: pendingCustomerPrices,
+          defaultPrices: pendingDefaultPrices
+        };
+        setCustomerSource("supabase");
+        nextHint = syncResult.changed ? `${nextHint} 客户资料已同步云端。` : "客户资料已同步云端。";
+      }
+    } catch {
+      nextHint = `${nextHint} 云端客户同步失败，当前先保留本地数据。`;
+    }
+
+    try {
+      await saveCustomerPriceGroups(pendingCustomerPrices);
+      await saveDefaultPrices(pendingDefaultPrices);
+      nextHint = `${nextHint} 价格表已同步云端。`;
+    } catch {
+      nextHint = `${nextHint} 云端价格表同步失败，当前先保留本地价格。`;
     }
 
     const previewOrder: OrderForm = includeInLedger
@@ -638,7 +751,7 @@ export function OrderEditorPage() {
             previousBalance: customerHistoricalBalance,
             currentAmount: form.totalAmount,
             totalAmount: sumMoneyText(customerHistoricalBalance, form.totalAmount),
-            relatedOrderId: editingHistoryRecordId
+            relatedOrderId: activeHistoryRecordId
           }
         }
       : {
@@ -646,33 +759,65 @@ export function OrderEditorPage() {
           billingSummary: undefined
         };
 
-    const historyRecord = saveHistoryRecord(rawInput, previewOrder, editingHistoryRecordId || undefined);
-    setEditingHistoryRecordId(historyRecord.id);
+    let historyRecord;
+    let savedToCloudHistory = false;
+    const recordIdForSave = historyEditMode ? editingHistoryRecordId || undefined : undefined;
 
-    if (includeInLedger) {
-      upsertAutoBillingRecord({
-        customerName: form.customer,
-        amount: form.totalAmount,
-        relatedOrderId: historyRecord.id,
-        note: "订单累计到账单：¥ " + form.totalAmount,
-        orderInfo: {
-          rawInput,
-          customer: form.customer,
-          totalAmount: form.totalAmount,
-          createdAtText: historyRecord.createdAtText
-        }
+    try {
+      historyRecord = await saveInvoiceHistoryRecord({
+        recordId: recordIdForSave,
+        form: previewOrder,
+        rawInput,
+        database: nextDatabase
       });
-      previewOrder.billingSummary = {
-        includeInLedger: true,
-        previousBalance: customerHistoricalBalance,
-        currentAmount: form.totalAmount,
-        totalAmount: sumMoneyText(customerHistoricalBalance, form.totalAmount),
-        relatedOrderId: historyRecord.id
-      };
-    } else {
-      removeAutoBillingRecordByOrderId(historyRecord.id);
+      savedToCloudHistory = true;
+      saveHistoryRecord(rawInput, previewOrder, historyRecord.id, historyRecord);
+      const hydratedDatabase = await loadDatabaseWithCloudCustomers(nextDatabase);
+      nextDatabase = hydratedDatabase.database;
+      setCustomerSource(hydratedDatabase.source);
+      nextHint = `${nextHint} 销货单已同步云端历史。`;
+    } catch (error) {
+      console.error(error);
+      historyRecord = saveHistoryRecord(rawInput, previewOrder, recordIdForSave);
+      nextHint = `${nextHint} 云端销货单保存失败，当前先保留本地历史。`;
     }
 
+    if (savedToCloudHistory && historyRecord) {
+      try {
+        if (includeInLedger) {
+          const matchedCustomer = nextDatabase.customers.find(
+            (customer) => customer.name.trim().toUpperCase() === form.customer.trim().toUpperCase()
+          );
+
+          await saveAutoBillingEntryForInvoice({
+            invoiceId: historyRecord.id,
+            customerName: form.customer,
+            customerId: matchedCustomer?.id,
+            amount: form.totalAmount,
+            note: `订单累计到账单：¥ ${form.totalAmount}`
+          });
+
+          previewOrder.billingSummary = {
+            includeInLedger: true,
+            previousBalance: customerHistoricalBalance,
+            currentAmount: form.totalAmount,
+            totalAmount: sumMoneyText(customerHistoricalBalance, form.totalAmount),
+            relatedOrderId: historyRecord.id
+          };
+        } else {
+          await removeAutoBillingEntryByInvoiceId(historyRecord.id);
+        }
+
+        const nextBillingRecords = await listBillingEntries();
+        setBillingRecords(nextBillingRecords);
+      } catch {
+        nextHint = `${nextHint} 云端账单同步失败，请到账单页确认。`;
+      }
+    }
+
+    setDatabase(nextDatabase);
+    setHint(nextHint);
+    setEditingHistoryRecordId(historyEditMode ? historyRecord.id : "");
     sessionStorage.setItem(PENDING_HISTORY_ID_KEY, historyRecord.id);
 
     const snapshot: EditorSnapshot = {
@@ -681,7 +826,9 @@ export function OrderEditorPage() {
       hasParsed: true,
       freightSelection,
       hint: nextHint,
-      editingHistoryRecordId: historyRecord.id,
+      editingHistoryRecordId: historyEditMode ? historyRecord.id : "",
+      historyEditMode,
+      persistCustomerDefaults,
       includeInLedger
     };
 
@@ -698,7 +845,7 @@ export function OrderEditorPage() {
   return (
     <main className="page-shell">
       <div className="page phone-frame">
-        <TopBar title="订单编辑" rightText="Phase 2 本地库" />
+        <TopBar title="订单编辑" rightText={customerSource === "supabase" ? "Phase 3 云端共享" : "Phase 3 本地回退"} />
 
         <section className="hero-card">
           <div className="hero-card__heading hero-card__heading--stack hero-card__heading--editor-title">
@@ -724,7 +871,7 @@ export function OrderEditorPage() {
             className="prompt-box prompt-box--compact-editor"
             placeholder="请输入报单内容"
             value={rawInput}
-            onChange={(event) => setRawInput(event.target.value)}
+            onChange={(event) => handleRawInputChange(event.target.value)}
             onPaste={handlePaste}
           />
 
@@ -873,6 +1020,15 @@ export function OrderEditorPage() {
                   onChange={(event) => updateFormField("remark", event.target.value)}
                 />
               </label>
+
+              <label className="compact-toggle compact-toggle--full" title="勾选后，会把当前电话、地址、货运方式保存到客户资料">
+                <input
+                  type="checkbox"
+                  checked={persistCustomerDefaults}
+                  onChange={(event) => setPersistCustomerDefaults(event.target.checked)}
+                />
+                <span>更新客户资料</span>
+              </label>
             </div>
 
             {shouldShowBillingPrompt ? (
@@ -1016,7 +1172,7 @@ export function OrderEditorPage() {
         ) : (
           <section className="empty-card">
             <h2>等待解析</h2>
-            <p>先粘贴报单内容，再用本地数据库补全客户资料和价格。</p>
+            <p>先粘贴报单内容，再用当前数据库补全客户资料和价格。</p>
           </section>
         )}
 
@@ -1030,6 +1186,24 @@ export function OrderEditorPage() {
     </main>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

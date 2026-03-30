@@ -1,15 +1,28 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import seedDatabase from "../data/localDbSeed.json";
+import { useAuth } from "../auth/AuthContext";
 import { includesKeyword } from "../components/HighlightedText";
 import { TopBar } from "../components/TopBar";
+import { downloadBusinessDatabase, loadBusinessDatabase, sanitizeDatabase } from "../localDb";
+import { formatHistoryTime } from "../historyStore";
+import { importLocalCustomersToCloud } from "../services/businessDatabase";
 import {
-  downloadBusinessDatabase,
-  loadBusinessDatabase,
-  sanitizeDatabase,
-  saveBusinessDatabase,
-} from "../localDb";
+  createCustomer,
+  deleteCustomerById,
+  listCustomerPage,
+  updateCustomer
+} from "../services/customers";
 import {
+  createDefaultPrice,
+  deleteDefaultPriceById,
+  findCustomerPriceGroupByCustomerName,
+  listDefaultPricePage,
+  saveCustomerPriceGroup,
+  updateDefaultPrice
+} from "../services/priceTables";
+import {
+  CustomerDataSource,
   CustomerPriceEntry,
   CustomerPriceGroup,
   CustomerRecord,
@@ -19,6 +32,16 @@ import {
 
 type ActiveTable = "customers" | "customerPrices" | "defaultPrices";
 
+type LocalPageResult<T> = {
+  records: T[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+};
+
+const PAGE_SIZE = 10;
+
 const tableLabels: Record<ActiveTable, string> = {
   customers: "客户信息表",
   customerPrices: "客户专属价格表",
@@ -27,7 +50,7 @@ const tableLabels: Record<ActiveTable, string> = {
 
 const searchPlaceholders: Record<ActiveTable, string> = {
   customers: "按客户名、电话或地址搜索",
-  customerPrices: "按客户名或版号搜索",
+  customerPrices: "先输入客户名，再查询该客户专属价格",
   defaultPrices: "按版号搜索"
 };
 
@@ -38,6 +61,7 @@ const createCustomerRow = (): CustomerRecord => ({
   address: "",
   defaultLogistics: "",
   note: "",
+  createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString()
 });
 
@@ -48,13 +72,6 @@ const createCustomerPriceEntry = (): CustomerPriceEntry => ({
   updatedAt: new Date().toISOString()
 });
 
-const createCustomerPriceGroup = (): CustomerPriceGroup => ({
-  id: crypto.randomUUID(),
-  customerName: "",
-  prices: [createCustomerPriceEntry()],
-  updatedAt: new Date().toISOString()
-});
-
 const createDefaultPriceRow = (): DefaultPriceRecord => ({
   id: crypto.randomUUID(),
   modelCode: "",
@@ -62,44 +79,313 @@ const createDefaultPriceRow = (): DefaultPriceRecord => ({
   updatedAt: new Date().toISOString()
 });
 
-const cloneDatabase = (database: LocalBusinessDatabase) =>
-  JSON.parse(JSON.stringify(database)) as LocalBusinessDatabase;
+const normalizeText = (value: string | undefined) => (value ?? "").trim();
+
+function cloneRows<T>(rows: T[]) {
+  return JSON.parse(JSON.stringify(rows)) as T[];
+}
+
+function cloneItem<T>(item: T) {
+  return JSON.parse(JSON.stringify(item)) as T;
+}
+
+function paginateRows<T>(rows: T[], page: number, pageSize: number): LocalPageResult<T> {
+  const safePageSize = Math.max(1, pageSize);
+  const totalCount = rows.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / safePageSize));
+  const safePage = Math.min(Math.max(1, page), totalPages);
+  const start = (safePage - 1) * safePageSize;
+
+  return {
+    records: rows.slice(start, start + safePageSize),
+    totalCount,
+    page: safePage,
+    pageSize: safePageSize,
+    totalPages
+  };
+}
+
+function buildLocalCustomerPage(
+  database: LocalBusinessDatabase,
+  page: number,
+  keyword: string
+): LocalPageResult<CustomerRecord> {
+  const filteredRows = normalizeText(keyword)
+    ? database.customers.filter((row) =>
+        includesKeyword([row.name, row.phone, row.address, row.note, row.defaultLogistics].join(" "), keyword)
+      )
+    : database.customers;
+
+  const sortedRows = [...filteredRows].sort(
+    (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+  );
+
+  return paginateRows(sortedRows, page, PAGE_SIZE);
+}
+
+function buildLocalDefaultPricePage(
+  database: LocalBusinessDatabase,
+  page: number,
+  keyword: string
+): LocalPageResult<DefaultPriceRecord> {
+  const filteredRows = normalizeText(keyword)
+    ? database.defaultPrices.filter((row) => includesKeyword(row.modelCode, keyword))
+    : database.defaultPrices;
+
+  const sortedRows = [...filteredRows].sort(
+    (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+  );
+
+  return paginateRows(sortedRows, page, PAGE_SIZE);
+}
+
+function ensureEditableCustomerPriceGroup(group: CustomerPriceGroup) {
+  return {
+    ...group,
+    prices: group.prices.length > 0 ? cloneRows(group.prices) : [createCustomerPriceEntry()]
+  };
+}
+
+function validateCustomers(records: CustomerRecord[]) {
+  const nameSet = new Set<string>();
+
+  for (let index = 0; index < records.length; index += 1) {
+    const customer = records[index];
+    const name = normalizeText(customer.name);
+
+    if (!name) {
+      return `客户表第 ${index + 1} 行客户名不能为空。`;
+    }
+
+    const key = name.toUpperCase();
+    if (nameSet.has(key)) {
+      return `当前页里出现重名客户：${name}。请先合并后再保存。`;
+    }
+
+    nameSet.add(key);
+  }
+
+  return "";
+}
+
+function validateCustomerPriceGroup(group: CustomerPriceGroup | null) {
+  if (!group) {
+    return "请先搜索客户，再编辑专属价格。";
+  }
+
+  const modelSet = new Set<string>();
+
+  for (let index = 0; index < group.prices.length; index += 1) {
+    const modelCode = normalizeText(group.prices[index].modelCode);
+    if (!modelCode) continue;
+
+    const modelKey = modelCode.toUpperCase();
+    if (modelSet.has(modelKey)) {
+      return `客户「${group.customerName}」的专属价格里有重复版号：${modelCode}。`;
+    }
+
+    modelSet.add(modelKey);
+  }
+
+  return "";
+}
+
+function validateDefaultPrices(records: DefaultPriceRecord[]) {
+  const modelSet = new Set<string>();
+
+  for (let index = 0; index < records.length; index += 1) {
+    const modelCode = normalizeText(records[index].modelCode);
+    if (!modelCode) continue;
+
+    const modelKey = modelCode.toUpperCase();
+    if (modelSet.has(modelKey)) {
+      return `默认单价表当前页有重复版号：${modelCode}。`;
+    }
+
+    modelSet.add(modelKey);
+  }
+
+  return "";
+}
+
+function hasCustomerChanged(left: CustomerRecord, right: CustomerRecord) {
+  return (
+    normalizeText(left.name) !== normalizeText(right.name) ||
+    normalizeText(left.phone) !== normalizeText(right.phone) ||
+    normalizeText(left.address) !== normalizeText(right.address) ||
+    normalizeText(left.defaultLogistics) !== normalizeText(right.defaultLogistics) ||
+    normalizeText(left.note) !== normalizeText(right.note)
+  );
+}
+
+function hasDefaultPriceChanged(left: DefaultPriceRecord, right: DefaultPriceRecord) {
+  return (
+    normalizeText(left.modelCode) !== normalizeText(right.modelCode) ||
+    normalizeText(left.unitPrice) !== normalizeText(right.unitPrice)
+  );
+}
+
+function hasCustomerPriceGroupChanged(left: CustomerPriceGroup | null, right: CustomerPriceGroup | null) {
+  return JSON.stringify(left) !== JSON.stringify(right);
+}
+
+function buildPageSummary(totalCount: number, page: number, totalPages: number) {
+  return `共 ${totalCount} 条，第 ${page} / ${totalPages} 页`;
+}
 
 export function DatabaseManagerPage() {
   const navigate = useNavigate();
+  const { profile } = useAuth();
   const initialDatabase = useMemo<LocalBusinessDatabase>(() => loadBusinessDatabase(), []);
-  const [savedDatabase, setSavedDatabase] = useState(initialDatabase);
-  const [draftDatabase, setDraftDatabase] = useState(initialDatabase);
-  const [activeTable, setActiveTable] = useState<ActiveTable>("customers");
-  const [searchKeyword, setSearchKeyword] = useState("");
-  const [notice, setNotice] = useState(
-    "这里展示的是本地业务数据库，页面内修改先保留为草稿，点击保存后才会写入当前设备。"
+  const seedLocalDatabase = useMemo(
+    () => sanitizeDatabase(seedDatabase as LocalBusinessDatabase),
+    []
   );
+  const [activeTable, setActiveTable] = useState<ActiveTable>("customers");
+  const [notice, setNotice] = useState("customers / 客户价 / 默认价现在都会同步到 Supabase。");
+  const [customerSource, setCustomerSource] = useState<CustomerDataSource>("local");
+  const [isSaving, setIsSaving] = useState(false);
+  const [isImportingCustomers, setIsImportingCustomers] = useState(false);
+  const [isLoadingCustomers, setIsLoadingCustomers] = useState(true);
+  const [isLoadingDefaultPrices, setIsLoadingDefaultPrices] = useState(true);
+  const [isLoadingCustomerPriceGroup, setIsLoadingCustomerPriceGroup] = useState(false);
 
-  const viewDatabase = draftDatabase;
-  const hasUnsavedChanges = useMemo(() => JSON.stringify(savedDatabase) !== JSON.stringify(draftDatabase), [draftDatabase, savedDatabase]);
+  const [customerSearchKeyword, setCustomerSearchKeyword] = useState("");
+  const [customerPage, setCustomerPage] = useState(1);
+  const [customerTotalPages, setCustomerTotalPages] = useState(1);
+  const [customerTotalCount, setCustomerTotalCount] = useState(0);
+  const [savedCustomerRows, setSavedCustomerRows] = useState<CustomerRecord[]>([]);
+  const [draftCustomerRows, setDraftCustomerRows] = useState<CustomerRecord[]>([]);
 
+  const [customerPriceSearchName, setCustomerPriceSearchName] = useState("");
+  const [savedCustomerPriceGroup, setSavedCustomerPriceGroup] = useState<CustomerPriceGroup | null>(null);
+  const [draftCustomerPriceGroup, setDraftCustomerPriceGroup] = useState<CustomerPriceGroup | null>(null);
 
-  const filteredCustomers = useMemo(() => {
-    if (!searchKeyword.trim()) return viewDatabase.customers;
-    return viewDatabase.customers.filter((row) =>
-      includesKeyword([row.name, row.phone, row.address].join(" "), searchKeyword)
-    );
-  }, [searchKeyword, viewDatabase.customers]);
+  const [defaultPriceSearchKeyword, setDefaultPriceSearchKeyword] = useState("");
+  const [defaultPricePage, setDefaultPricePage] = useState(1);
+  const [defaultPriceTotalPages, setDefaultPriceTotalPages] = useState(1);
+  const [defaultPriceTotalCount, setDefaultPriceTotalCount] = useState(0);
+  const [savedDefaultPriceRows, setSavedDefaultPriceRows] = useState<DefaultPriceRecord[]>([]);
+  const [draftDefaultPriceRows, setDraftDefaultPriceRows] = useState<DefaultPriceRecord[]>([]);
 
-  const filteredCustomerPriceGroups = useMemo(() => {
-    if (!searchKeyword.trim()) return viewDatabase.customerPrices;
+  const hasCustomerChanges = useMemo(
+    () => JSON.stringify(savedCustomerRows) !== JSON.stringify(draftCustomerRows),
+    [draftCustomerRows, savedCustomerRows]
+  );
+  const hasCustomerPriceChanges = useMemo(
+    () => hasCustomerPriceGroupChanged(savedCustomerPriceGroup, draftCustomerPriceGroup),
+    [draftCustomerPriceGroup, savedCustomerPriceGroup]
+  );
+  const hasDefaultPriceChanges = useMemo(
+    () => JSON.stringify(savedDefaultPriceRows) !== JSON.stringify(draftDefaultPriceRows),
+    [draftDefaultPriceRows, savedDefaultPriceRows]
+  );
+  const hasUnsavedChanges = hasCustomerChanges || hasCustomerPriceChanges || hasDefaultPriceChanges;
 
-    return viewDatabase.customerPrices.filter((group) => {
-      if (includesKeyword(group.customerName, searchKeyword)) return true;
-      return group.prices.some((entry) => includesKeyword(entry.modelCode, searchKeyword));
-    });
-  }, [searchKeyword, viewDatabase.customerPrices]);
+  const activeSearchKeyword =
+    activeTable === "customers"
+      ? customerSearchKeyword
+      : activeTable === "customerPrices"
+        ? customerPriceSearchName
+        : defaultPriceSearchKeyword;
+  const activeTableLoading =
+    activeTable === "customers"
+      ? isLoadingCustomers
+      : activeTable === "customerPrices"
+        ? isLoadingCustomerPriceGroup
+        : isLoadingDefaultPrices;
 
-  const filteredDefaultPrices = useMemo(() => {
-    if (!searchKeyword.trim()) return viewDatabase.defaultPrices;
-    return viewDatabase.defaultPrices.filter((row) => includesKeyword(row.modelCode, searchKeyword));
-  }, [searchKeyword, viewDatabase.defaultPrices]);
+  useEffect(() => {
+    let active = true;
+
+    const loadCustomersPageData = async () => {
+      setIsLoadingCustomers(true);
+
+      try {
+        const result = await listCustomerPage({
+          page: customerPage,
+          pageSize: PAGE_SIZE,
+          keyword: customerSearchKeyword
+        });
+        if (!active) return;
+
+        if (customerPage > result.totalPages && result.totalCount > 0) {
+          setCustomerPage(result.totalPages);
+          return;
+        }
+
+        setSavedCustomerRows(result.records);
+        setDraftCustomerRows(cloneRows(result.records));
+        setCustomerTotalPages(result.totalPages);
+        setCustomerTotalCount(result.totalCount);
+        setCustomerSource("supabase");
+      } catch {
+        if (!active) return;
+        const fallbackPage = buildLocalCustomerPage(initialDatabase, customerPage, customerSearchKeyword);
+        setSavedCustomerRows(fallbackPage.records);
+        setDraftCustomerRows(cloneRows(fallbackPage.records));
+        setCustomerTotalPages(fallbackPage.totalPages);
+        setCustomerTotalCount(fallbackPage.totalCount);
+        setCustomerSource("local");
+        setNotice("当前 customers 暂时回退到本地数据，保存仍会优先尝试写 Supabase。请稍后再试云端连接。");
+      } finally {
+        if (active) {
+          setIsLoadingCustomers(false);
+        }
+      }
+    };
+
+    void loadCustomersPageData();
+
+    return () => {
+      active = false;
+    };
+  }, [customerPage, customerSearchKeyword, initialDatabase]);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadDefaultPricePageData = async () => {
+      setIsLoadingDefaultPrices(true);
+
+      try {
+        const result = await listDefaultPricePage({
+          page: defaultPricePage,
+          pageSize: PAGE_SIZE,
+          keyword: defaultPriceSearchKeyword
+        });
+        if (!active) return;
+
+        if (defaultPricePage > result.totalPages && result.totalCount > 0) {
+          setDefaultPricePage(result.totalPages);
+          return;
+        }
+
+        setSavedDefaultPriceRows(result.records);
+        setDraftDefaultPriceRows(cloneRows(result.records));
+        setDefaultPriceTotalPages(result.totalPages);
+        setDefaultPriceTotalCount(result.totalCount);
+      } catch {
+        if (!active) return;
+        const fallbackPage = buildLocalDefaultPricePage(initialDatabase, defaultPricePage, defaultPriceSearchKeyword);
+        setSavedDefaultPriceRows(fallbackPage.records);
+        setDraftDefaultPriceRows(cloneRows(fallbackPage.records));
+        setDefaultPriceTotalPages(fallbackPage.totalPages);
+        setDefaultPriceTotalCount(fallbackPage.totalCount);
+        setNotice("当前默认单价表暂时回退到本地数据，保存仍会优先尝试写 Supabase。请稍后再试云端连接。");
+      } finally {
+        if (active) {
+          setIsLoadingDefaultPrices(false);
+        }
+      }
+    };
+
+    void loadDefaultPricePageData();
+
+    return () => {
+      active = false;
+    };
+  }, [defaultPricePage, defaultPriceSearchKeyword, initialDatabase]);
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -112,38 +398,215 @@ export function DatabaseManagerPage() {
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [hasUnsavedChanges]);
 
-  const updateDraftDatabase = (updater: (current: LocalBusinessDatabase) => LocalBusinessDatabase, message: string) => {
-    setDraftDatabase((current) => updater(cloneDatabase(current)));
-    setNotice(message);
+  const refreshCustomers = async (targetPage = customerPage, targetKeyword = customerSearchKeyword) => {
+    const result = await listCustomerPage({ page: targetPage, pageSize: PAGE_SIZE, keyword: targetKeyword });
+    setSavedCustomerRows(result.records);
+    setDraftCustomerRows(cloneRows(result.records));
+    setCustomerTotalPages(result.totalPages);
+    setCustomerTotalCount(result.totalCount);
+    setCustomerPage(result.page);
+    setCustomerSource("supabase");
+    return result;
+  };
+
+  const refreshDefaultPrices = async (
+    targetPage = defaultPricePage,
+    targetKeyword = defaultPriceSearchKeyword
+  ) => {
+    const result = await listDefaultPricePage({
+      page: targetPage,
+      pageSize: PAGE_SIZE,
+      keyword: targetKeyword
+    });
+    setSavedDefaultPriceRows(result.records);
+    setDraftDefaultPriceRows(cloneRows(result.records));
+    setDefaultPriceTotalPages(result.totalPages);
+    setDefaultPriceTotalCount(result.totalCount);
+    setDefaultPricePage(result.page);
+    return result;
   };
 
   const handleExport = () => {
-    downloadBusinessDatabase(viewDatabase);
-    setNotice("已导出当前草稿数据库 JSON。未保存的改动也会一起导出。");
+    downloadBusinessDatabase(loadBusinessDatabase());
+    setNotice("已导出当前本地兼容 JSON 快照。分页页签未加载到的云端数据不会包含在这份导出里。");
   };
 
   const handleResetDraft = () => {
-    const confirmed = window.confirm("确定恢复为内置示例数据吗？这只会重置当前页面草稿，仍需你点击保存后才会真正写入本地。");
-    if (!confirmed) return;
-
-    const nextDatabase = sanitizeDatabase(seedDatabase as LocalBusinessDatabase);
-    setDraftDatabase(nextDatabase);
-    setNotice("已恢复为内置示例库草稿，记得点击保存。");
-  };
-
-  const handleSave = () => {
-    if (!hasUnsavedChanges) {
-      setNotice("当前没有未保存变更。");
+    if (activeTable === "customers") {
+      const fallbackPage = paginateRows(seedLocalDatabase.customers, 1, PAGE_SIZE);
+      setCustomerSearchKeyword("");
+      setCustomerPage(1);
+      setDraftCustomerRows(cloneRows(fallbackPage.records));
+      setNotice("已恢复客户信息表示例草稿。只有点击保存，才会覆盖云端当前页对应记录。");
       return;
     }
 
-    const confirmed = window.confirm("确认保存当前数据库修改吗？保存后会覆盖当前设备里的本地数据库。");
+    if (activeTable === "customerPrices") {
+      setCustomerPriceSearchName("");
+      setSavedCustomerPriceGroup(null);
+      setDraftCustomerPriceGroup(null);
+      setNotice("已清空客户专属价格页，重新搜索客户后再编辑。");
+      return;
+    }
+
+    const fallbackPage = paginateRows(
+      [...seedLocalDatabase.defaultPrices].sort(
+        (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+      ),
+      1,
+      PAGE_SIZE
+    );
+    setDefaultPriceSearchKeyword("");
+    setDefaultPricePage(1);
+    setDraftDefaultPriceRows(cloneRows(fallbackPage.records));
+    setNotice("已恢复默认单价表示例草稿。只有点击保存，才会覆盖云端当前页对应记录。");
+  };
+
+  const handleSaveCustomers = async () => {
+    const customerError = validateCustomers(draftCustomerRows);
+    if (customerError) {
+      setNotice(customerError);
+      return;
+    }
+
+    const confirmed = window.confirm("确认保存当前页客户信息吗？本页改动会同步到 Supabase。");
     if (!confirmed) return;
 
-    const nextDatabase = saveBusinessDatabase(draftDatabase);
-    setSavedDatabase(nextDatabase);
-    setDraftDatabase(nextDatabase);
-    setNotice("数据库已保存到当前设备。");
+    const savedMap = new Map(savedCustomerRows.map((row) => [row.id, row]));
+    const draftMap = new Map(draftCustomerRows.map((row) => [row.id, row]));
+
+    setIsSaving(true);
+    try {
+      for (const [rowId] of savedMap) {
+        if (!draftMap.has(rowId)) {
+          await deleteCustomerById(rowId);
+        }
+      }
+
+      for (const [rowId, draftRow] of draftMap) {
+        const savedRow = savedMap.get(rowId);
+        if (!savedRow) {
+          await createCustomer(draftRow);
+          continue;
+        }
+
+        if (hasCustomerChanged(savedRow, draftRow)) {
+          await updateCustomer(draftRow);
+        }
+      }
+
+      const refreshed = await refreshCustomers();
+      setNotice(`客户信息表已同步到 Supabase。${buildPageSummary(refreshed.totalCount, refreshed.page, refreshed.totalPages)}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "客户信息表保存失败，请稍后再试。");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveCustomerPriceGroup = async () => {
+    const customerPriceError = validateCustomerPriceGroup(draftCustomerPriceGroup);
+    if (customerPriceError) {
+      setNotice(customerPriceError);
+      return;
+    }
+
+    if (!draftCustomerPriceGroup) {
+      setNotice("请先搜索客户，再编辑专属价格。");
+      return;
+    }
+
+    const confirmed = window.confirm(`确认保存「${draftCustomerPriceGroup.customerName}」的专属价格吗？`);
+    if (!confirmed) return;
+
+    setIsSaving(true);
+    try {
+      const savedGroup = await saveCustomerPriceGroup(draftCustomerPriceGroup);
+      const editableGroup = ensureEditableCustomerPriceGroup(savedGroup);
+      setSavedCustomerPriceGroup(editableGroup);
+      setDraftCustomerPriceGroup(cloneItem(editableGroup));
+      setNotice(`客户「${editableGroup.customerName}」的专属价格已同步到 Supabase。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "客户专属价格保存失败，请稍后再试。");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  const handleSaveDefaultPrices = async () => {
+    const defaultPriceError = validateDefaultPrices(draftDefaultPriceRows);
+    if (defaultPriceError) {
+      setNotice(defaultPriceError);
+      return;
+    }
+
+    const confirmed = window.confirm("确认保存当前页默认单价吗？本页改动会同步到 Supabase。");
+    if (!confirmed) return;
+
+    const savedMap = new Map(savedDefaultPriceRows.map((row) => [row.id, row]));
+    const nextRows = draftDefaultPriceRows.filter((row) => normalizeText(row.modelCode));
+    const nextIds = new Set(nextRows.map((row) => row.id));
+
+    setIsSaving(true);
+    try {
+      for (const savedRow of savedDefaultPriceRows) {
+        if (!nextIds.has(savedRow.id)) {
+          await deleteDefaultPriceById(savedRow.id);
+        }
+      }
+
+      for (const draftRow of nextRows) {
+        const savedRow = savedMap.get(draftRow.id);
+        if (!savedRow) {
+          await createDefaultPrice(draftRow);
+          continue;
+        }
+
+        if (hasDefaultPriceChanged(savedRow, draftRow)) {
+          await updateDefaultPrice(draftRow);
+        }
+      }
+
+      const refreshed = await refreshDefaultPrices();
+      setNotice(`默认单价表已同步到 Supabase。${buildPageSummary(refreshed.totalCount, refreshed.page, refreshed.totalPages)}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "默认单价表保存失败，请稍后再试。");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if (activeTable === "customers") {
+      await handleSaveCustomers();
+      return;
+    }
+
+    if (activeTable === "customerPrices") {
+      await handleSaveCustomerPriceGroup();
+      return;
+    }
+
+    await handleSaveDefaultPrices();
+  };
+
+  const handleImportCustomers = async () => {
+    const confirmed = window.confirm(
+      "确认把当前本地 customers 导入 Supabase 吗？如果云端已经有同名客户，会按 id 或唯一名规则合并。"
+    );
+    if (!confirmed) return;
+
+    try {
+      setIsImportingCustomers(true);
+      await importLocalCustomersToCloud(initialDatabase);
+      await refreshCustomers(1, "");
+      setCustomerSearchKeyword("");
+      setCustomerPage(1);
+      setNotice("本地 customers 已导入 Supabase，后续多店员会看到同一套客户数据。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "导入云端失败，请稍后再试。");
+    } finally {
+      setIsImportingCustomers(false);
+    }
   };
 
   const handleBackToEditor = () => {
@@ -157,73 +620,48 @@ export function DatabaseManagerPage() {
 
   const handleCustomerChange = (
     rowId: string,
-    field: keyof Omit<CustomerRecord, "id" | "updatedAt">,
+    field: keyof Omit<
+      CustomerRecord,
+      "id" | "createdAt" | "updatedAt" | "createdBy" | "updatedBy" | "createdByName" | "updatedByName"
+    >,
     value: string
   ) => {
-    updateDraftDatabase(
-      (current) => ({
-        ...current,
-        customers: current.customers.map((row) =>
-          row.id === rowId
-            ? {
-                ...row,
-                [field]: value,
-                updatedAt: new Date().toISOString()
-              }
-            : row
-        )
-      }),
-      "客户信息草稿已更新，记得保存。"
+    setDraftCustomerRows((current) =>
+      current.map((row) =>
+        row.id === rowId
+          ? {
+              ...row,
+              [field]: value,
+              updatedAt: new Date().toISOString()
+            }
+          : row
+      )
     );
-  };
-
-  const handleCustomerGroupChange = (groupId: string, customerName: string) => {
-    updateDraftDatabase(
-      (current) => ({
-        ...current,
-        customerPrices: current.customerPrices.map((group) =>
-          group.id === groupId
-            ? {
-                ...group,
-                customerName,
-                updatedAt: new Date().toISOString()
-              }
-            : group
-        )
-      }),
-      "客户专属价格草稿已更新，记得保存。"
-    );
+    setNotice("客户信息草稿已更新，记得保存当前页。");
   };
 
   const handleCustomerPriceEntryChange = (
-    groupId: string,
     entryId: string,
     field: keyof Omit<CustomerPriceEntry, "id" | "updatedAt">,
     value: string
   ) => {
-    updateDraftDatabase(
-      (current) => ({
+    setDraftCustomerPriceGroup((current) => {
+      if (!current) return current;
+      return {
         ...current,
-        customerPrices: current.customerPrices.map((group) =>
-          group.id === groupId
+        updatedAt: new Date().toISOString(),
+        prices: current.prices.map((entry) =>
+          entry.id === entryId
             ? {
-                ...group,
-                updatedAt: new Date().toISOString(),
-                prices: group.prices.map((entry) =>
-                  entry.id === entryId
-                    ? {
-                        ...entry,
-                        [field]: value,
-                        updatedAt: new Date().toISOString()
-                      }
-                    : entry
-                )
+                ...entry,
+                [field]: value,
+                updatedAt: new Date().toISOString()
               }
-            : group
+            : entry
         )
-      }),
-      "客户专属价格草稿已更新，记得保存。"
-    );
+      };
+    });
+    setNotice("客户专属价格草稿已更新，记得保存这位客户的价格组。");
   };
 
   const handleDefaultPriceChange = (
@@ -231,130 +669,154 @@ export function DatabaseManagerPage() {
     field: keyof Omit<DefaultPriceRecord, "id" | "updatedAt">,
     value: string
   ) => {
-    updateDraftDatabase(
-      (current) => ({
-        ...current,
-        defaultPrices: current.defaultPrices.map((row) =>
-          row.id === rowId
-            ? {
-                ...row,
-                [field]: value,
-                updatedAt: new Date().toISOString()
-              }
-            : row
-        )
-      }),
-      "默认单价草稿已更新，记得保存。"
+    setDraftDefaultPriceRows((current) =>
+      current.map((row) =>
+        row.id === rowId
+          ? {
+              ...row,
+              [field]: value,
+              updatedAt: new Date().toISOString()
+            }
+          : row
+      )
     );
+    setNotice("默认单价草稿已更新，记得保存当前页。");
   };
 
   const handleDeleteCustomer = (rowId: string) => {
-    updateDraftDatabase(
-      (current) => ({
-        ...current,
-        customers: current.customers.filter((row) => row.id !== rowId)
-      }),
-      "客户记录已从草稿删除，记得保存。"
-    );
+    setDraftCustomerRows((current) => current.filter((row) => row.id !== rowId));
+    setNotice("客户记录已从当前页草稿删除，记得保存。");
   };
 
-  const handleDeleteCustomerGroup = (groupId: string) => {
-    updateDraftDatabase(
-      (current) => ({
+  const handleDeleteCustomerPriceEntry = (entryId: string) => {
+    setDraftCustomerPriceGroup((current) => {
+      if (!current) return current;
+      const remainingPrices = current.prices.filter((entry) => entry.id !== entryId);
+      return {
         ...current,
-        customerPrices: current.customerPrices.filter((group) => group.id !== groupId)
-      }),
-      "客户价格组已从草稿删除，记得保存。"
-    );
-  };
-
-  const handleDeleteCustomerPriceEntry = (groupId: string, entryId: string) => {
-    updateDraftDatabase(
-      (current) => ({
-        ...current,
-        customerPrices: current.customerPrices.map((group) => {
-          if (group.id !== groupId) return group;
-
-          const remainingPrices = group.prices.filter((entry) => entry.id !== entryId);
-          return {
-            ...group,
-            updatedAt: new Date().toISOString(),
-            prices: remainingPrices.length > 0 ? remainingPrices : [createCustomerPriceEntry()]
-          };
-        })
-      }),
-      "客户专属价格行已从草稿删除，记得保存。"
-    );
+        updatedAt: new Date().toISOString(),
+        prices: remainingPrices.length > 0 ? remainingPrices : [createCustomerPriceEntry()]
+      };
+    });
+    setNotice("客户专属价格行已删除，记得保存这位客户的价格组。");
   };
 
   const handleDeleteDefaultPrice = (rowId: string) => {
-    updateDraftDatabase(
-      (current) => ({
-        ...current,
-        defaultPrices: current.defaultPrices.filter((row) => row.id !== rowId)
-      }),
-      "默认单价已从草稿删除，记得保存。"
-    );
+    setDraftDefaultPriceRows((current) => current.filter((row) => row.id !== rowId));
+    setNotice("默认单价已从当前页草稿删除，记得保存。");
   };
 
   const handleAddCustomer = () => {
-    updateDraftDatabase(
-      (current) => ({
-        ...current,
-        customers: [createCustomerRow(), ...current.customers]
-      }),
-      "已新增一行客户草稿。"
-    );
+    setDraftCustomerRows((current) => [createCustomerRow(), ...current].slice(0, PAGE_SIZE));
+    setNotice("已在当前页新增一行客户草稿。");
   };
 
-  const handleAddCustomerGroup = () => {
-    updateDraftDatabase(
-      (current) => ({
+  const handleAddCustomerPriceEntry = () => {
+    setDraftCustomerPriceGroup((current) => {
+      if (!current) return current;
+      return {
         ...current,
-        customerPrices: [createCustomerPriceGroup(), ...current.customerPrices]
-      }),
-      "已新增一个客户价格组草稿。"
-    );
+        updatedAt: new Date().toISOString(),
+        prices: [...current.prices, createCustomerPriceEntry()]
+      };
+    });
+    setNotice("已为这位客户新增一行专属价格草稿。");
   };
 
-  const handleAddCustomerPriceEntry = (groupId: string) => {
-    updateDraftDatabase(
-      (current) => ({
+  const handleClearCustomerPriceGroup = () => {
+    setDraftCustomerPriceGroup((current) => {
+      if (!current) return current;
+      return {
         ...current,
-        customerPrices: current.customerPrices.map((group) =>
-          group.id === groupId
-            ? {
-                ...group,
-                updatedAt: new Date().toISOString(),
-                prices: [...group.prices, createCustomerPriceEntry()]
-              }
-            : group
-        )
-      }),
-      "已新增一行客户专属价格草稿。"
-    );
+        updatedAt: new Date().toISOString(),
+        prices: [createCustomerPriceEntry()]
+      };
+    });
+    setNotice("当前客户的专属价格草稿已清空，保存后会删除这位客户已有的专属价格。");
   };
 
   const handleAddDefaultPrice = () => {
-    updateDraftDatabase(
-      (current) => ({
-        ...current,
-        defaultPrices: [createDefaultPriceRow(), ...current.defaultPrices]
-      }),
-      "已新增一行默认单价草稿。"
-    );
+    setDraftDefaultPriceRows((current) => [createDefaultPriceRow(), ...current].slice(0, PAGE_SIZE));
+    setNotice("已在当前页新增一行默认单价草稿。");
+  };
+
+  const handleSearchCustomerPriceGroup = async () => {
+    const customerName = normalizeText(customerPriceSearchName);
+    if (!customerName) {
+      setSavedCustomerPriceGroup(null);
+      setDraftCustomerPriceGroup(null);
+      setNotice("请先输入客户名，再查询专属价格。");
+      return;
+    }
+
+    try {
+      setIsLoadingCustomerPriceGroup(true);
+      const matchedGroup = await findCustomerPriceGroupByCustomerName(customerName);
+
+      if (matchedGroup) {
+        const editableGroup = ensureEditableCustomerPriceGroup(matchedGroup);
+        setSavedCustomerPriceGroup(editableGroup);
+        setDraftCustomerPriceGroup(cloneItem(editableGroup));
+        setNotice(
+          matchedGroup.prices.length > 0
+            ? `已读取客户「${editableGroup.customerName}」的全部专属价格。`
+            : `已找到客户「${editableGroup.customerName}」，当前还没有专属价格，可直接新增。`
+        );
+        return;
+      }
+
+      const shouldCreate = window.confirm(`客户信息表里还没有「${customerName}」。是否先新增这个客户，再进入他的专属价格组？`);
+      if (!shouldCreate) {
+        setSavedCustomerPriceGroup(null);
+        setDraftCustomerPriceGroup(null);
+        setNotice(`未找到客户「${customerName}」，所以暂时没有加载专属价格。`);
+        return;
+      }
+
+      const createdCustomer = await createCustomer({
+        id: crypto.randomUUID(),
+        name: customerName,
+        phone: "",
+        address: "",
+        defaultLogistics: "",
+        note: "",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+      const newGroup = ensureEditableCustomerPriceGroup({
+        id: createdCustomer.id,
+        customerName: createdCustomer.name,
+        prices: [],
+        updatedAt: createdCustomer.updatedAt
+      });
+      setSavedCustomerPriceGroup(newGroup);
+      setDraftCustomerPriceGroup(cloneItem(newGroup));
+      setNotice(`已先新增客户「${createdCustomer.name}」，现在可以填写他的专属价格。`);
+      void refreshCustomers(customerPage, customerSearchKeyword);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "客户专属价格读取失败，请稍后再试。");
+    } finally {
+      setIsLoadingCustomerPriceGroup(false);
+    }
+  };
+
+  const handleClearCustomerPriceSearch = () => {
+    setCustomerPriceSearchName("");
+    setSavedCustomerPriceGroup(null);
+    setDraftCustomerPriceGroup(null);
+    setNotice("已清空客户专属价格查询结果。输入客户名后再查询。");
   };
 
   return (
     <main className="page-shell">
       <div className="page phone-frame phone-frame--database">
-        <TopBar title="数据库管理" rightText="Phase 2 本地库" />
+        <TopBar title="数据库管理" rightText="Phase 3 云端数据库" />
 
         <section className="hero-card">
           <div className="hero-card__heading hero-card__heading--stack">
             <div>
-              <h2>本地业务数据库</h2>
-              <p>规则：客户专属单价 &gt; 默认单价表 &gt; 手动输入。型号统一按版号维护，例如 860-12 和 860-20 都归到 860。</p>
+              <h2>共享业务数据库</h2>
+              <p>当前 customers、客户专属价、默认单价都改为 Supabase 云端共享，多个店员会看到同一套数据。</p>
             </div>
             <div className="action-row action-row--tight">
               <button className="secondary-button btn-nav-back" type="button" onClick={handleBackToEditor}>
@@ -390,15 +852,61 @@ export function DatabaseManagerPage() {
           </div>
 
           <div className="database-toolbar database-toolbar--search">
-            <span className={hasUnsavedChanges ? "danger-chip" : "success-chip"}>
-              {hasUnsavedChanges ? "有未保存修改" : "已保存"}
-            </span>
-            <input
-              className="field-input database-search-input"
-              placeholder={searchPlaceholders[activeTable]}
-              value={searchKeyword}
-              onChange={(event) => setSearchKeyword(event.target.value)}
-            />
+            <div className="database-toolbar__meta">
+              <span className={hasUnsavedChanges ? "danger-chip" : "success-chip"}>
+                {hasUnsavedChanges ? "有未保存修改" : "已保存"}
+              </span>
+              <span className={`database-source-pill ${customerSource === "local" ? "database-source-pill--local" : ""}`}>
+                当前数据库：{customerSource === "supabase" ? "Supabase 云端" : "本地回退"}
+              </span>
+              {activeTableLoading ? <span className="ghost-chip">正在加载当前表...</span> : null}
+            </div>
+
+            <div className="database-toolbar__search-box">
+              <input
+                className="field-input database-search-input"
+                placeholder={searchPlaceholders[activeTable]}
+                value={activeSearchKeyword}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (activeTable === "customers") {
+                    setCustomerSearchKeyword(value);
+                    setCustomerPage(1);
+                    return;
+                  }
+
+                  if (activeTable === "customerPrices") {
+                    setCustomerPriceSearchName(value);
+                    return;
+                  }
+
+                  setDefaultPriceSearchKeyword(value);
+                  setDefaultPricePage(1);
+                }}
+                onKeyDown={(event) => {
+                  if (activeTable === "customerPrices" && event.key === "Enter") {
+                    event.preventDefault();
+                    void handleSearchCustomerPriceGroup();
+                  }
+                }}
+              />
+
+              {activeTable === "customerPrices" ? (
+                <div className="database-toolbar__search-actions">
+                  <button
+                    className="inline-button btn-action-soft"
+                    type="button"
+                    onClick={() => void handleSearchCustomerPriceGroup()}
+                    disabled={isLoadingCustomerPriceGroup}
+                  >
+                    {isLoadingCustomerPriceGroup ? "查询中..." : "查询客户"}
+                  </button>
+                  <button className="ghost-button btn-utility" type="button" onClick={handleClearCustomerPriceSearch}>
+                    清空
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
         </section>
 
@@ -406,10 +914,25 @@ export function DatabaseManagerPage() {
           {activeTable === "customers" ? (
             <>
               <div className="section-title-row">
-                <h2>客户信息表</h2>
-                <button className="inline-button btn-action-soft" type="button" onClick={handleAddCustomer}>
-                  新增客户
-                </button>
+                <div>
+                  <h2>客户信息表</h2>
+                  <p className="table-meta">当前每页 10 条，按最近修改时间优先显示。</p>
+                </div>
+                <div className="action-row action-row--tight">
+                  {profile?.role === "admin" && customerSource === "local" ? (
+                    <button
+                      className="ghost-button btn-action-soft"
+                      type="button"
+                      onClick={handleImportCustomers}
+                      disabled={isImportingCustomers}
+                    >
+                      {isImportingCustomers ? "导入中..." : "导入云端"}
+                    </button>
+                  ) : null}
+                  <button className="inline-button btn-action-soft" type="button" onClick={handleAddCustomer}>
+                    新增客户
+                  </button>
+                </div>
               </div>
 
               <div className="db-table-wrap">
@@ -421,22 +944,48 @@ export function DatabaseManagerPage() {
                       <th>地址</th>
                       <th>默认货运方式</th>
                       <th>备注</th>
+                      <th>最后修改</th>
                       <th>操作</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredCustomers.map((row) => (
-                      <tr key={row.id} className={includesKeyword([row.name, row.phone, row.address, row.defaultLogistics, row.note].join(" "), searchKeyword) ? "search-hit-row" : ""}>
-                        <td><input className={`db-table-input ${includesKeyword(row.name, searchKeyword) ? "search-hit-input" : ""}`} value={row.name} onChange={(event) => handleCustomerChange(row.id, "name", event.target.value)} /></td>
-                        <td><input className={`db-table-input ${includesKeyword(row.phone, searchKeyword) ? "search-hit-input" : ""}`} value={row.phone} onChange={(event) => handleCustomerChange(row.id, "phone", event.target.value)} /></td>
-                        <td><input className={`db-table-input ${includesKeyword(row.address, searchKeyword) ? "search-hit-input" : ""}`} value={row.address} onChange={(event) => handleCustomerChange(row.id, "address", event.target.value)} /></td>
-                        <td><input className={`db-table-input ${includesKeyword(row.defaultLogistics, searchKeyword) ? "search-hit-input" : ""}`} value={row.defaultLogistics} onChange={(event) => handleCustomerChange(row.id, "defaultLogistics", event.target.value)} /></td>
-                        <td><input className={`db-table-input ${includesKeyword(row.note, searchKeyword) ? "search-hit-input" : ""}`} value={row.note} onChange={(event) => handleCustomerChange(row.id, "note", event.target.value)} /></td>
+                    {draftCustomerRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={7}>
+                          <div className="database-empty-cell">当前页没有客户数据。</div>
+                        </td>
+                      </tr>
+                    ) : null}
+
+                    {draftCustomerRows.map((row) => (
+                      <tr
+                        key={row.id}
+                        className={includesKeyword([row.name, row.phone, row.address, row.defaultLogistics, row.note].join(" "), customerSearchKeyword) ? "search-hit-row" : ""}
+                      >
+                        <td><input className={`db-table-input ${includesKeyword(row.name, customerSearchKeyword) ? "search-hit-input" : ""}`} value={row.name} onChange={(event) => handleCustomerChange(row.id, "name", event.target.value)} /></td>
+                        <td><input className={`db-table-input ${includesKeyword(row.phone, customerSearchKeyword) ? "search-hit-input" : ""}`} value={row.phone} onChange={(event) => handleCustomerChange(row.id, "phone", event.target.value)} /></td>
+                        <td><input className={`db-table-input ${includesKeyword(row.address, customerSearchKeyword) ? "search-hit-input" : ""}`} value={row.address} onChange={(event) => handleCustomerChange(row.id, "address", event.target.value)} /></td>
+                        <td><input className={`db-table-input ${includesKeyword(row.defaultLogistics, customerSearchKeyword) ? "search-hit-input" : ""}`} value={row.defaultLogistics} onChange={(event) => handleCustomerChange(row.id, "defaultLogistics", event.target.value)} /></td>
+                        <td><input className={`db-table-input ${includesKeyword(row.note, customerSearchKeyword) ? "search-hit-input" : ""}`} value={row.note} onChange={(event) => handleCustomerChange(row.id, "note", event.target.value)} /></td>
+                        <td className="customer-meta">
+                          <span className="customer-meta__time">{row.updatedAt ? formatHistoryTime(row.updatedAt) : "-"}</span>
+                          <span className="customer-meta__user">{row.updatedByName || "-"}</span>
+                        </td>
                         <td><button className="delete-button delete-button--table" type="button" onClick={() => handleDeleteCustomer(row.id)}>删除</button></td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+              </div>
+
+              <div className="database-pagination">
+                <button className="ghost-button btn-utility" type="button" onClick={() => setCustomerPage((current) => Math.max(1, current - 1))} disabled={customerPage <= 1 || isLoadingCustomers}>
+                  上一页
+                </button>
+                <span className="ghost-chip">{buildPageSummary(customerTotalCount, customerPage, customerTotalPages)}</span>
+                <button className="ghost-button btn-utility" type="button" onClick={() => setCustomerPage((current) => Math.min(customerTotalPages, current + 1))} disabled={customerPage >= customerTotalPages || isLoadingCustomers}>
+                  下一页
+                </button>
               </div>
             </>
           ) : null}
@@ -444,64 +993,70 @@ export function DatabaseManagerPage() {
           {activeTable === "customerPrices" ? (
             <>
               <div className="section-title-row">
-                <h2>客户专属价格表</h2>
-                <button className="inline-button btn-action-soft" type="button" onClick={handleAddCustomerGroup}>
-                  新增客户价格组
-                </button>
+                <div>
+                  <h2>客户专属价格表</h2>
+                  <p className="table-meta">默认不预加载。先搜索客户名，再读取这位客户的全部专属价格。</p>
+                </div>
+                {draftCustomerPriceGroup ? (
+                  <div className="action-row action-row--tight">
+                    <button className="inline-button btn-action-soft" type="button" onClick={handleAddCustomerPriceEntry}>
+                      新增版号
+                    </button>
+                    <button className="ghost-button btn-danger-soft" type="button" onClick={handleClearCustomerPriceGroup}>
+                      清空价格组
+                    </button>
+                  </div>
+                ) : null}
               </div>
 
-              <div className="price-group-list">
-                {filteredCustomerPriceGroups.map((group) => {
-                  return (
-                    <div className={`price-group-card ${includesKeyword([group.customerName, ...group.prices.map((entry) => `${entry.modelCode} ${entry.unitPrice}`)].join(" "), searchKeyword) ? "search-hit-card" : ""}`} key={group.id}>
-                      <div className="price-group-card__head">
-                        <input
-                          className={`field-input price-group-card__customer ${includesKeyword(group.customerName, searchKeyword) ? "search-hit-input" : ""}`}
-                          placeholder="客户名"
-                          value={group.customerName}
-                          onChange={(event) => handleCustomerGroupChange(group.id, event.target.value)}
-                        />
-                        <div className="price-group-card__actions">
-                          <button className="inline-button btn-action-soft" type="button" onClick={() => handleAddCustomerPriceEntry(group.id)}>
-                            新增版号
-                          </button>
-                          <button className="delete-button btn-danger-soft" type="button" onClick={() => handleDeleteCustomerGroup(group.id)}>
-                            删除客户组
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="db-table-wrap">
-                        <table className="db-table db-table--compact">
-                          <thead>
-                            <tr>
-                              <th>版号</th>
-                              <th>单价</th>
-                              <th>操作</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {group.prices.map((entry) => (
-                              <tr key={entry.id} className={includesKeyword([entry.modelCode, entry.unitPrice].join(" "), searchKeyword) ? "search-hit-row" : ""}>
-                                <td><input className={`db-table-input ${includesKeyword(entry.modelCode, searchKeyword) ? "search-hit-input" : ""}`} value={entry.modelCode} onChange={(event) => handleCustomerPriceEntryChange(group.id, entry.id, "modelCode", event.target.value)} /></td>
-                                <td><input className={`db-table-input ${includesKeyword(entry.unitPrice, searchKeyword) ? "search-hit-input" : ""}`} inputMode="decimal" value={entry.unitPrice} onChange={(event) => handleCustomerPriceEntryChange(group.id, entry.id, "unitPrice", event.target.value)} /></td>
-                                <td><button className="delete-button delete-button--table" type="button" onClick={() => handleDeleteCustomerPriceEntry(group.id, entry.id)}>删除</button></td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+              {!draftCustomerPriceGroup ? (
+                <div className="empty-card history-empty-card database-empty-card">
+                  <h2>先搜索客户</h2>
+                  <p>输入客户名后点击“查询客户”，再编辑这位客户的全部专属价格。</p>
+                </div>
+              ) : (
+                <div className="price-group-list">
+                  <div className="price-group-card" key={draftCustomerPriceGroup.id}>
+                    <div className="price-group-card__head">
+                      <input className="field-input price-group-card__customer" value={draftCustomerPriceGroup.customerName} readOnly />
+                      <div className="price-group-card__actions">
+                        <span className="table-badge">已加载该客户全部专属价格</span>
                       </div>
                     </div>
-                  );
-                })}
-              </div>
+
+                    <div className="db-table-wrap">
+                      <table className="db-table db-table--compact">
+                        <thead>
+                          <tr>
+                            <th>版号</th>
+                            <th>单价</th>
+                            <th>操作</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {draftCustomerPriceGroup.prices.map((entry) => (
+                            <tr key={entry.id}>
+                              <td><input className="db-table-input" value={entry.modelCode} onChange={(event) => handleCustomerPriceEntryChange(entry.id, "modelCode", event.target.value)} /></td>
+                              <td><input className="db-table-input" inputMode="decimal" value={entry.unitPrice} onChange={(event) => handleCustomerPriceEntryChange(entry.id, "unitPrice", event.target.value)} /></td>
+                              <td><button className="delete-button delete-button--table" type="button" onClick={() => handleDeleteCustomerPriceEntry(entry.id)}>删除</button></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
             </>
           ) : null}
 
           {activeTable === "defaultPrices" ? (
             <>
               <div className="section-title-row">
-                <h2>默认单价表</h2>
+                <div>
+                  <h2>默认单价表</h2>
+                  <p className="table-meta">当前每页 10 条，按最近更新时间优先显示，不再按版号数字顺序自动排序。</p>
+                </div>
                 <button className="inline-button btn-action-soft" type="button" onClick={handleAddDefaultPrice}>
                   新增默认价
                 </button>
@@ -513,19 +1068,41 @@ export function DatabaseManagerPage() {
                     <tr>
                       <th>版号</th>
                       <th>默认单价</th>
+                      <th>最后修改</th>
                       <th>操作</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredDefaultPrices.map((row) => (
-                      <tr key={row.id} className={includesKeyword([row.modelCode, row.unitPrice].join(" "), searchKeyword) ? "search-hit-row" : ""}>
-                        <td><input className={`db-table-input ${includesKeyword(row.modelCode, searchKeyword) ? "search-hit-input" : ""}`} value={row.modelCode} onChange={(event) => handleDefaultPriceChange(row.id, "modelCode", event.target.value)} /></td>
-                        <td><input className={`db-table-input ${includesKeyword(row.unitPrice, searchKeyword) ? "search-hit-input" : ""}`} inputMode="decimal" value={row.unitPrice} onChange={(event) => handleDefaultPriceChange(row.id, "unitPrice", event.target.value)} /></td>
+                    {draftDefaultPriceRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={4}>
+                          <div className="database-empty-cell">当前页没有默认单价数据。</div>
+                        </td>
+                      </tr>
+                    ) : null}
+
+                    {draftDefaultPriceRows.map((row) => (
+                      <tr key={row.id} className={includesKeyword([row.modelCode, row.unitPrice].join(" "), defaultPriceSearchKeyword) ? "search-hit-row" : ""}>
+                        <td><input className={`db-table-input ${includesKeyword(row.modelCode, defaultPriceSearchKeyword) ? "search-hit-input" : ""}`} value={row.modelCode} onChange={(event) => handleDefaultPriceChange(row.id, "modelCode", event.target.value)} /></td>
+                        <td><input className={`db-table-input ${includesKeyword(row.unitPrice, defaultPriceSearchKeyword) ? "search-hit-input" : ""}`} inputMode="decimal" value={row.unitPrice} onChange={(event) => handleDefaultPriceChange(row.id, "unitPrice", event.target.value)} /></td>
+                        <td className="customer-meta">
+                          <span className="customer-meta__time">{row.updatedAt ? formatHistoryTime(row.updatedAt) : "-"}</span>
+                        </td>
                         <td><button className="delete-button delete-button--table" type="button" onClick={() => handleDeleteDefaultPrice(row.id)}>删除</button></td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+              </div>
+
+              <div className="database-pagination">
+                <button className="ghost-button btn-utility" type="button" onClick={() => setDefaultPricePage((current) => Math.max(1, current - 1))} disabled={defaultPricePage <= 1 || isLoadingDefaultPrices}>
+                  上一页
+                </button>
+                <span className="ghost-chip">{buildPageSummary(defaultPriceTotalCount, defaultPricePage, defaultPriceTotalPages)}</span>
+                <button className="ghost-button btn-utility" type="button" onClick={() => setDefaultPricePage((current) => Math.min(defaultPriceTotalPages, current + 1))} disabled={defaultPricePage >= defaultPriceTotalPages || isLoadingDefaultPrices}>
+                  下一页
+                </button>
               </div>
             </>
           ) : null}
@@ -537,8 +1114,8 @@ export function DatabaseManagerPage() {
             <button className="ghost-button btn-nav-back" type="button" onClick={handleBackToEditor}>
               返回编辑页
             </button>
-            <button className="primary-button btn-action-primary database-save-button" type="button" onClick={handleSave}>
-              保存数据库
+            <button className="primary-button btn-action-primary database-save-button" type="button" onClick={() => void handleSave()} disabled={isSaving || activeTableLoading}>
+              {isSaving ? "保存中..." : activeTable === "customerPrices" ? "保存当前客户价格组" : "保存当前页"}
             </button>
           </div>
         </div>
@@ -546,19 +1123,3 @@ export function DatabaseManagerPage() {
     </main>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

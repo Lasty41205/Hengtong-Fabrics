@@ -15,28 +15,52 @@ export const formatHistoryTime = (dateValue: Date | string) => {
   return `${formatHistoryDate(date)} ${padText(date.getHours())}:${padText(date.getMinutes())}:${padText(date.getSeconds())}`;
 };
 
-const sanitizeHistoryRecord = (record: Partial<HistoryRecord>): HistoryRecord => ({
-  id: record.id || crypto.randomUUID(),
-  createdAt: record.createdAt || new Date().toISOString(),
-  createdAtText: record.createdAtText || formatHistoryTime(record.createdAt || new Date()),
-  rawInput: record.rawInput || "",
-  customer: record.customer || "",
-  phone: record.phone || "",
-  address: record.address || "",
-  logistics: record.logistics || "",
-  remark: record.remark || "",
-  items: (record.items || []).map((item) => ({
-    id: item.id || crypto.randomUUID(),
-    nameSpec: item.nameSpec || "",
-    modelCode: item.modelCode || "",
-    quantity: item.quantity || "",
-    unitPrice: item.unitPrice || "",
-    amount: item.amount || "",
-    priceSource: item.priceSource || "manual"
-  })),
-  totalAmount: record.totalAmount || "0",
-  previewImageDataUrl: record.previewImageDataUrl || ""
-});
+const sanitizeHistoryRecord = (record: Partial<HistoryRecord>): HistoryRecord => {
+  const createdAt = record.createdAt || new Date().toISOString();
+  const updatedAt = record.updatedAt || createdAt;
+
+  return {
+    id: record.id || crypto.randomUUID(),
+    createdAt,
+    createdAtText: record.createdAtText || formatHistoryTime(createdAt),
+    updatedAt,
+    updatedAtText: record.updatedAtText || formatHistoryTime(updatedAt),
+    rawInput: record.rawInput || "",
+    customer: record.customer || "",
+    phone: record.phone || "",
+    address: record.address || "",
+    logistics: record.logistics || "",
+    remark: record.remark || "",
+    items: (record.items || []).map((item) => ({
+      id: item.id || crypto.randomUUID(),
+      nameSpec: item.nameSpec || "",
+      modelCode: item.modelCode || "",
+      quantity: item.quantity || "",
+      unitPrice: item.unitPrice || "",
+      amount: item.amount || "",
+      priceSource: item.priceSource || "manual"
+    })),
+    totalAmount: record.totalAmount || "0",
+    previewImageDataUrl: record.previewImageDataUrl || "",
+    createdByName: record.createdByName || "",
+    updatedByName: record.updatedByName || ""
+  };
+};
+
+function isQuotaExceededError(error: unknown) {
+  if (error instanceof DOMException) {
+    return error.name === "QuotaExceededError" || error.name === "NS_ERROR_DOM_QUOTA_REACHED";
+  }
+
+  return String(error ?? "").includes("QuotaExceeded");
+}
+
+function stripHistoryPreviewImages(records: HistoryRecord[]) {
+  return records.map((record) => ({
+    ...record,
+    previewImageDataUrl: ""
+  }));
+}
 
 export function loadHistoryRecords() {
   try {
@@ -46,23 +70,42 @@ export function loadHistoryRecords() {
     const parsed = JSON.parse(raw) as Partial<HistoryRecord>[];
     return parsed
       .map(sanitizeHistoryRecord)
-      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+      .sort(
+        (left, right) => new Date(right.updatedAt || right.createdAt).getTime() - new Date(left.updatedAt || left.createdAt).getTime()
+      );
   } catch {
     return [];
   }
 }
 
 export function saveHistoryRecords(records: HistoryRecord[]) {
-  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(records));
-  return records;
+  const normalizedRecords = records.map(sanitizeHistoryRecord);
+
+  try {
+    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(normalizedRecords));
+    return normalizedRecords;
+  } catch (error) {
+    if (!isQuotaExceededError(error)) {
+      throw error;
+    }
+
+    const compactRecords = stripHistoryPreviewImages(normalizedRecords);
+    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(compactRecords));
+    return compactRecords;
+  }
 }
 
-export function saveHistoryRecord(rawInput: string, form: OrderForm, recordId?: string) {
+export function saveHistoryRecord(rawInput: string, form: OrderForm, recordId?: string, extra?: Partial<HistoryRecord>) {
   const now = new Date();
+  const createdAt = extra?.createdAt || now.toISOString();
+  const updatedAt = extra?.updatedAt || createdAt;
+
   const nextRecord = sanitizeHistoryRecord({
     id: recordId || crypto.randomUUID(),
-    createdAt: now.toISOString(),
-    createdAtText: formatHistoryTime(now),
+    createdAt,
+    createdAtText: extra?.createdAtText || formatHistoryTime(createdAt),
+    updatedAt,
+    updatedAtText: extra?.updatedAtText || formatHistoryTime(updatedAt),
     rawInput,
     customer: form.customer,
     phone: form.phone,
@@ -79,7 +122,9 @@ export function saveHistoryRecord(rawInput: string, form: OrderForm, recordId?: 
       priceSource: item.priceSource
     })),
     totalAmount: form.totalAmount,
-    previewImageDataUrl: ""
+    previewImageDataUrl: extra?.previewImageDataUrl || "",
+    createdByName: extra?.createdByName || "",
+    updatedByName: extra?.updatedByName || ""
   });
 
   const existingRecords = loadHistoryRecords().filter((record) => record.id !== nextRecord.id);
@@ -102,4 +147,3 @@ export function updateHistoryRecordImage(recordId: string, previewImageDataUrl: 
 
   saveHistoryRecords(nextRecords);
 }
-
