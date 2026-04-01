@@ -1,4 +1,4 @@
-import { createCustomer, listCustomers } from "./customers";
+import { createCustomer, findCustomerByNameExact } from "./customers";
 import { requireSupabaseClient } from "../lib/supabase";
 import {
   BillingCustomerSummary,
@@ -172,8 +172,7 @@ async function ensureCustomer(customerName: string, customerId?: string) {
     return null;
   }
 
-  const customers = await listCustomers();
-  const matchedCustomer = customers.find((customer) => normalizeNameKey(customer.name) === normalizeNameKey(safeName));
+  const matchedCustomer = await findCustomerByNameExact(safeName);
   if (matchedCustomer) {
     return matchedCustomer.id;
   }
@@ -318,6 +317,26 @@ export async function deleteBillingEntryById(id: string) {
   }
 }
 
+async function findAutoBillingEntryByInvoiceId(invoiceId: string) {
+  const safeInvoiceId = normalizeText(invoiceId);
+  if (!safeInvoiceId) return null;
+
+  const client = requireSupabaseClient();
+  const { data, error } = await client
+    .from("billing_entries")
+    .select(billingSelect)
+    .eq("invoice_id", safeInvoiceId)
+    .eq("entry_type", "auto_add")
+    .limit(1)
+    .maybeSingle<BillingEntryRow>();
+
+  if (error) {
+    throw new Error(normalizeBillingError(error));
+  }
+
+  return data ? mapRowToBillingRecord(data) : null;
+}
+
 export async function saveAutoBillingEntryForInvoice(options: {
   invoiceId: string;
   customerName: string;
@@ -325,10 +344,7 @@ export async function saveAutoBillingEntryForInvoice(options: {
   amount: string;
   note?: string;
 }) {
-  const records = await listBillingEntries();
-  const existingRecord = records.find(
-    (record) => record.type === "auto_add" && record.relatedOrderId === options.invoiceId
-  );
+  const existingRecord = await findAutoBillingEntryByInvoiceId(options.invoiceId);
 
   if (existingRecord) {
     return updateBillingEntry(existingRecord.id, {
@@ -358,8 +374,8 @@ export async function saveAutoBillingEntryForInvoice(options: {
 
 export async function removeAutoBillingEntryByInvoiceId(invoiceId: string) {
   if (!normalizeText(invoiceId)) return;
-  const records = await listBillingEntries();
-  const target = records.find((record) => record.type === "auto_add" && record.relatedOrderId === invoiceId);
+  const target = await findAutoBillingEntryByInvoiceId(invoiceId);
   if (!target) return;
   await deleteBillingEntryById(target.id);
 }
+

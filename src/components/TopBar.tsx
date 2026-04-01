@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 
 type TopBarProps = {
@@ -7,6 +8,7 @@ type TopBarProps = {
 };
 
 export function TopBar({ title, rightText }: TopBarProps) {
+  const navigate = useNavigate();
   const { profile, signOut } = useAuth();
   const [submitting, setSubmitting] = useState(false);
 
@@ -14,6 +16,10 @@ export function TopBar({ title, rightText }: TopBarProps) {
     try {
       setSubmitting(true);
       await signOut();
+      navigate("/login", {
+        replace: true,
+        state: { forceEditorRedirect: true }
+      });
     } finally {
       setSubmitting(false);
     }

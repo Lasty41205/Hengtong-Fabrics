@@ -182,23 +182,22 @@ $$;
 create or replace function public.list_active_login_accounts()
 returns table (
   id uuid,
-  display_name text,
-  email text
+  display_name text
 )
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select p.id, p.display_name, p.email
+  select p.id, p.display_name
   from public.profiles p
   where p.is_active = true
     and coalesce(trim(p.display_name), '') <> ''
-    and coalesce(trim(p.email), '') <> ''
   order by p.display_name
 $$;
 
-grant execute on function public.list_active_login_accounts() to anon, authenticated;
+revoke execute on function public.list_active_login_accounts() from anon;
+grant execute on function public.list_active_login_accounts() to authenticated;
 
 create or replace function public.handle_new_auth_user()
 returns trigger
@@ -377,4 +376,5 @@ for all
 to authenticated
 using (public.current_profile_is_active())
 with check (public.current_profile_is_active());
+
 

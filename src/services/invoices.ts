@@ -3,7 +3,7 @@ import { formatHistoryTime, loadHistoryRecords } from "../historyStore";
 import { splitLogisticsValue, buildLogisticsValue } from "../lib/shipping";
 import { requireSupabaseClient } from "../lib/supabase";
 import { CustomerRecord, HistoryListRecord, HistoryRecord, LocalBusinessDatabase, OrderForm } from "../types";
-import { createCustomer, listCustomers, updateCustomer } from "./customers";
+import { createCustomer, findCustomerByNameExact, getCustomerById } from "./customers";
 
 type ProfileRef = {
   display_name: string | null;
@@ -30,6 +30,12 @@ type InvoiceItemRow = {
   unit_price: number | null;
   amount: number | null;
   sort_order: number | null;
+};
+
+type InvoiceExistingRow = {
+  id: string;
+  customer_id: string | null;
+  invoice_no: string;
 };
 
 type InvoiceRow = {
@@ -265,7 +271,7 @@ function mapRowToHistoryRecord(row: InvoiceRow): HistoryRecord {
 async function ensureInvoiceCustomerId(
   database: LocalBusinessDatabase,
   form: OrderForm,
-  existingInvoice: InvoiceRow | null
+  existingInvoice: InvoiceExistingRow | null
 ) {
   const customerName = normalizeText(form.customer);
   if (!customerName) {
@@ -273,26 +279,11 @@ async function ensureInvoiceCustomerId(
   }
 
   const localCustomer = findCustomerRecord(database, customerName);
-  const cloudCustomers = await listCustomers();
   const existingCloudCustomer =
-    cloudCustomers.find((customer) => localCustomer?.id && customer.id === localCustomer.id) ||
-    cloudCustomers.find((customer) => normalizeNameKey(customer.name) === normalizeNameKey(customerName));
+    (localCustomer?.id ? await getCustomerById(localCustomer.id) : null) ||
+    (await findCustomerByNameExact(customerName));
 
   if (existingCloudCustomer) {
-    const shouldPatchCustomer =
-      (!normalizeText(existingCloudCustomer.phone) && normalizeText(form.phone)) ||
-      (!normalizeText(existingCloudCustomer.address) && normalizeText(form.address)) ||
-      (!normalizeText(existingCloudCustomer.defaultLogistics) && normalizeText(form.logistics));
-
-    if (shouldPatchCustomer) {
-      await updateCustomer({
-        ...existingCloudCustomer,
-        phone: normalizeText(existingCloudCustomer.phone) || normalizeText(form.phone),
-        address: normalizeText(existingCloudCustomer.address) || normalizeText(form.address),
-        defaultLogistics: normalizeText(existingCloudCustomer.defaultLogistics) || normalizeText(form.logistics)
-      });
-    }
-
     return existingCloudCustomer.id;
   }
 
@@ -316,7 +307,7 @@ function buildInvoicePayload(
   customerId: string | null,
   form: OrderForm,
   rawInput: string,
-  existingInvoice: InvoiceRow | null
+  existingInvoice: InvoiceExistingRow | null
 ): InvoiceWritePayload {
   const shipping = splitLogisticsValue(form.logistics);
 
@@ -363,6 +354,21 @@ async function fetchInvoiceRowById(invoiceId: string) {
     .select(invoiceDetailSelect)
     .eq("id", invoiceId)
     .maybeSingle<InvoiceRow>();
+
+  if (error) {
+    throw new Error(normalizeInvoiceError(error));
+  }
+
+  return data ?? null;
+}
+
+async function fetchInvoiceExistingRowById(invoiceId: string) {
+  const client = requireSupabaseClient();
+  const { data, error } = await client
+    .from("invoices")
+    .select("id, customer_id, invoice_no")
+    .eq("id", invoiceId)
+    .maybeSingle<InvoiceExistingRow>();
 
   if (error) {
     throw new Error(normalizeInvoiceError(error));
@@ -475,7 +481,7 @@ export async function saveInvoiceHistoryRecord(options: {
 }) {
   const client = requireSupabaseClient();
   const invoiceId = options.recordId || crypto.randomUUID();
-  const existingInvoice = options.recordId ? await fetchInvoiceRowById(options.recordId) : null;
+  const existingInvoice = options.recordId ? await fetchInvoiceExistingRowById(options.recordId) : null;
   const customerId = await ensureInvoiceCustomerId(options.database, options.form, existingInvoice);
   const invoicePayload = buildInvoicePayload(invoiceId, customerId, options.form, options.rawInput, existingInvoice);
 
@@ -518,10 +524,11 @@ export async function saveInvoiceHistoryRecord(options: {
     }
   }
 
-  const savedHistoryRecord = await getInvoiceHistoryRecordById(invoiceId);
-  if (!savedHistoryRecord) {
-    throw new Error("销货单已写入云端，但回读失败，请刷新历史记录页确认。");
-  }
-
-  return savedHistoryRecord;
+  return {
+    id: invoiceId,
+    customerId,
+    invoiceNo: invoicePayload.invoice_no
+  };
 }
+
+

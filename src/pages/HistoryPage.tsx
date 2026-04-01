@@ -347,7 +347,7 @@ export function HistoryPage() {
                                 order={previewOrder}
                                 rows={previewRows}
                                 dateText={detailRecord.createdAt}
-                                className="preview-sheet--viewer-fallback"
+                                className="preview-sheet--viewer-fallback preview-sheet--history-detail"
                               />
                             ) : null}
                           </div>
@@ -376,6 +376,7 @@ export function HistoryPage() {
     </main>
   );
 }
+
 
 
 

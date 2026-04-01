@@ -22,7 +22,7 @@ import {
   removeAutoBillingEntryByInvoiceId,
   saveAutoBillingEntryForInvoice
 } from "../services/billingEntries";
-import { saveCustomerPriceGroups, saveDefaultPrices } from "../services/priceTables";
+import { saveCustomerPriceGroup } from "../services/priceTables";
 import {
   createEmptyForm,
   createEmptyItem,
@@ -34,7 +34,7 @@ import {
   resolveFreightSelection
 } from "../mockData";
 import { calculateAmount, calculateTotalAmount } from "../orderMath";
-import { BillingRecord, HistoryRecord, LocalBusinessDatabase, OrderForm, OrderItem } from "../types";
+import { BillingRecord, CustomerPriceGroup, HistoryRecord, LocalBusinessDatabase, OrderForm, OrderItem } from "../types";
 import { collectValidationIssues, getInputIssue, parseLocalOrderInput } from "../utils";
 
 const fieldTips = {
@@ -208,12 +208,49 @@ function buildStateFromHistoryRecord(record: HistoryRecord): EditorSnapshot {
   };
 }
 
+function normalizeCompareText(value: string) {
+  return value.trim().toUpperCase();
+}
+
+function pickCustomerPriceGroup(groups: CustomerPriceGroup[], customerName: string) {
+  const normalizedCustomerName = normalizeCompareText(customerName);
+  if (!normalizedCustomerName) return null;
+
+  return groups.find((group) => normalizeCompareText(group.customerName) === normalizedCustomerName) ?? null;
+}
+
+function serializeCustomerPriceGroup(group: CustomerPriceGroup | null) {
+  if (!group) return "";
+
+  return JSON.stringify({
+    customerName: normalizeCompareText(group.customerName),
+    prices: [...group.prices]
+      .map((entry) => ({
+        modelCode: normalizeCompareText(entry.modelCode),
+        unitPrice: entry.unitPrice.trim()
+      }))
+      .sort((left, right) => left.modelCode.localeCompare(right.modelCode, "zh-Hans-CN", { sensitivity: "base" }))
+  });
+}
+
+function hasCustomerPriceGroupChanged(
+  previousGroups: CustomerPriceGroup[],
+  nextGroups: CustomerPriceGroup[],
+  customerName: string
+) {
+  return (
+    serializeCustomerPriceGroup(pickCustomerPriceGroup(previousGroups, customerName)) !==
+    serializeCustomerPriceGroup(pickCustomerPriceGroup(nextGroups, customerName))
+  );
+}
+
 export function OrderEditorPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const editorSectionRef = useRef<HTMLElement | null>(null);
   const itemsPanelRef = useRef<HTMLDivElement | null>(null);
   const fieldRefs = useRef<Record<string, FocusableElement | null>>({});
+  const isGeneratingRef = useRef(false);
   const routeState = location.state as EditorRouteState;
   const routeHistoryRecord = routeState?.historyRecord;
   const initialDatabase = useMemo<LocalBusinessDatabase>(() => loadBusinessDatabase(), []);
@@ -237,6 +274,7 @@ export function OrderEditorPage() {
   const [activeFieldKey, setActiveFieldKey] = useState("");
   const [pastedImage, setPastedImage] = useState<PastedImage | null>(null);
   const [billingRecords, setBillingRecords] = useState<BillingRecord[]>([]);
+  const [isGenerating, setIsGenerating] = useState(false);
 
   const invalidCount = useMemo(() => collectValidationIssues(form).length, [form]);
   const activeHistoryRecordId = historyEditMode ? editingHistoryRecordId : "";
@@ -712,129 +750,141 @@ export function OrderEditorPage() {
       return;
     }
 
-    const syncResult = syncOrderToDatabase(form, database);
-    let nextDatabase = syncResult.changed ? saveBusinessDatabase(syncResult.database) : database;
-    const pendingCustomerPrices = nextDatabase.customerPrices;
-    const pendingDefaultPrices = nextDatabase.defaultPrices;
-    let nextHint = syncResult.changed ? syncResult.summary : hint;
-
-    try {
-      const cloudSyncResult = await syncOrderCustomerToCloud(nextDatabase, form, {
-        overwriteExisting: persistCustomerDefaults
-      });
-      if (cloudSyncResult.source === "supabase") {
-        nextDatabase = {
-          ...cloudSyncResult.database,
-          customerPrices: pendingCustomerPrices,
-          defaultPrices: pendingDefaultPrices
-        };
-        setCustomerSource("supabase");
-        nextHint = syncResult.changed ? `${nextHint} 客户资料已同步云端。` : "客户资料已同步云端。";
-      }
-    } catch {
-      nextHint = `${nextHint} 云端客户同步失败，当前先保留本地数据。`;
+    if (isGeneratingRef.current) {
+      setHint("正在处理当前销货单，请勿重复点击。");
+      return;
     }
 
-    try {
-      await saveCustomerPriceGroups(pendingCustomerPrices);
-      await saveDefaultPrices(pendingDefaultPrices);
-      nextHint = `${nextHint} 价格表已同步云端。`;
-    } catch {
-      nextHint = `${nextHint} 云端价格表同步失败，当前先保留本地价格。`;
-    }
+    isGeneratingRef.current = true;
+    setIsGenerating(true);
+    setHint("正在生成销货单，请稍等...");
 
-    const previewOrder: OrderForm = includeInLedger
-      ? {
-          ...form,
-          billingSummary: {
-            includeInLedger: true,
-            previousBalance: customerHistoricalBalance,
-            currentAmount: form.totalAmount,
-            totalAmount: sumMoneyText(customerHistoricalBalance, form.totalAmount),
-            relatedOrderId: activeHistoryRecordId
+    try {
+      const syncResult = syncOrderToDatabase(form, database);
+      const nextDatabase = syncResult.changed ? saveBusinessDatabase(syncResult.database) : database;
+      const nextCustomerPriceGroup = pickCustomerPriceGroup(nextDatabase.customerPrices, form.customer);
+      const customerPriceGroupChanged = hasCustomerPriceGroupChanged(
+        database.customerPrices,
+        nextDatabase.customerPrices,
+        form.customer
+      );
+
+      const previewOrder: OrderForm = includeInLedger
+        ? {
+            ...form,
+            billingSummary: {
+              includeInLedger: true,
+              previousBalance: customerHistoricalBalance,
+              currentAmount: form.totalAmount,
+              totalAmount: sumMoneyText(customerHistoricalBalance, form.totalAmount),
+              relatedOrderId: activeHistoryRecordId
+            }
           }
-        }
-      : {
-          ...form,
-          billingSummary: undefined
-        };
-
-    let historyRecord;
-    let savedToCloudHistory = false;
-    const recordIdForSave = historyEditMode ? editingHistoryRecordId || undefined : undefined;
-
-    try {
-      historyRecord = await saveInvoiceHistoryRecord({
-        recordId: recordIdForSave,
-        form: previewOrder,
-        rawInput,
-        database: nextDatabase
-      });
-      savedToCloudHistory = true;
-      saveHistoryRecord(rawInput, previewOrder, historyRecord.id, historyRecord);
-      const hydratedDatabase = await loadDatabaseWithCloudCustomers(nextDatabase);
-      nextDatabase = hydratedDatabase.database;
-      setCustomerSource(hydratedDatabase.source);
-      nextHint = `${nextHint} 销货单已同步云端历史。`;
-    } catch (error) {
-      console.error(error);
-      historyRecord = saveHistoryRecord(rawInput, previewOrder, recordIdForSave);
-      nextHint = `${nextHint} 云端销货单保存失败，当前先保留本地历史。`;
-    }
-
-    if (savedToCloudHistory && historyRecord) {
-      try {
-        if (includeInLedger) {
-          const matchedCustomer = nextDatabase.customers.find(
-            (customer) => customer.name.trim().toUpperCase() === form.customer.trim().toUpperCase()
-          );
-
-          await saveAutoBillingEntryForInvoice({
-            invoiceId: historyRecord.id,
-            customerName: form.customer,
-            customerId: matchedCustomer?.id,
-            amount: form.totalAmount,
-            note: `订单累计到账单：¥ ${form.totalAmount}`
-          });
-
-          previewOrder.billingSummary = {
-            includeInLedger: true,
-            previousBalance: customerHistoricalBalance,
-            currentAmount: form.totalAmount,
-            totalAmount: sumMoneyText(customerHistoricalBalance, form.totalAmount),
-            relatedOrderId: historyRecord.id
+        : {
+            ...form,
+            billingSummary: undefined
           };
-        } else {
-          await removeAutoBillingEntryByInvoiceId(historyRecord.id);
-        }
 
-        const nextBillingRecords = await listBillingEntries();
-        setBillingRecords(nextBillingRecords);
-      } catch {
-        nextHint = `${nextHint} 云端账单同步失败，请到账单页确认。`;
+      const recordIdForSave = historyEditMode ? editingHistoryRecordId || undefined : undefined;
+
+      let savedInvoice;
+      try {
+        savedInvoice = await saveInvoiceHistoryRecord({
+          recordId: recordIdForSave,
+          form: previewOrder,
+          rawInput,
+          database: nextDatabase
+        });
+      } catch (error) {
+        console.error(error);
+        setHint(error instanceof Error ? error.message : "云端销货单保存失败，请稍后重试。");
+        return;
       }
+
+      if (includeInLedger) {
+        previewOrder.billingSummary = {
+          includeInLedger: true,
+          previousBalance: customerHistoricalBalance,
+          currentAmount: form.totalAmount,
+          totalAmount: sumMoneyText(customerHistoricalBalance, form.totalAmount),
+          relatedOrderId: savedInvoice.id
+        };
+      }
+
+      saveHistoryRecord(rawInput, previewOrder, savedInvoice.id);
+
+      const nextHint = `${syncResult.changed ? `${syncResult.summary} ` : ""}销货单核心数据已保存，正在继续补做其他同步。`.trim();
+
+      setDatabase(nextDatabase);
+      setHint(nextHint);
+      setEditingHistoryRecordId(historyEditMode ? savedInvoice.id : "");
+      sessionStorage.setItem(PENDING_HISTORY_ID_KEY, savedInvoice.id);
+
+      const snapshot: EditorSnapshot = {
+        rawInput,
+        form: previewOrder,
+        hasParsed: true,
+        freightSelection,
+        hint: nextHint,
+        editingHistoryRecordId: historyEditMode ? savedInvoice.id : "",
+        historyEditMode,
+        persistCustomerDefaults,
+        includeInLedger
+      };
+
+      sessionStorage.setItem(EDITOR_STATE_KEY, JSON.stringify(snapshot));
+      sessionStorage.setItem("invoice-preview-order", JSON.stringify(previewOrder));
+      navigate("/preview", { state: { order: previewOrder } });
+
+      window.setTimeout(() => {
+        void (async () => {
+          try {
+            const customerSyncResult = await syncOrderCustomerToCloud(nextDatabase, form, {
+              overwriteExisting: persistCustomerDefaults
+            });
+
+            if (customerSyncResult.source === "supabase" && customerPriceGroupChanged && nextCustomerPriceGroup) {
+              try {
+                const matchedCustomer = customerSyncResult.database.customers.find(
+                  (customer) => customer.name.trim().toUpperCase() === form.customer.trim().toUpperCase()
+                );
+
+                if (matchedCustomer) {
+                  await saveCustomerPriceGroup({
+                    ...nextCustomerPriceGroup,
+                    id: matchedCustomer.id,
+                    customerName: matchedCustomer.name
+                  });
+                }
+              } catch (error) {
+                console.warn("客户价格延后同步失败", error);
+              }
+            }
+          } catch (error) {
+            console.warn("客户资料延后同步失败", error);
+          }
+
+          try {
+            if (includeInLedger) {
+              await saveAutoBillingEntryForInvoice({
+                invoiceId: savedInvoice.id,
+                customerName: form.customer,
+                customerId: savedInvoice.customerId ?? undefined,
+                amount: form.totalAmount,
+                note: `订单累计到账单：¥ ${form.totalAmount}`
+              });
+            } else {
+              await removeAutoBillingEntryByInvoiceId(savedInvoice.id);
+            }
+          } catch (error) {
+            console.warn("账单延后同步失败", error);
+          }
+        })();
+      }, 0);
+    } finally {
+      isGeneratingRef.current = false;
+      setIsGenerating(false);
     }
-
-    setDatabase(nextDatabase);
-    setHint(nextHint);
-    setEditingHistoryRecordId(historyEditMode ? historyRecord.id : "");
-    sessionStorage.setItem(PENDING_HISTORY_ID_KEY, historyRecord.id);
-
-    const snapshot: EditorSnapshot = {
-      rawInput,
-      form: previewOrder,
-      hasParsed: true,
-      freightSelection,
-      hint: nextHint,
-      editingHistoryRecordId: historyEditMode ? historyRecord.id : "",
-      historyEditMode,
-      persistCustomerDefaults,
-      includeInLedger
-    };
-
-    sessionStorage.setItem(EDITOR_STATE_KEY, JSON.stringify(snapshot));
-    sessionStorage.setItem("invoice-preview-order", JSON.stringify(previewOrder));
-    navigate("/preview", { state: { order: previewOrder } });
   };
 
   const customerIssue = getInputIssue(form.issues.customer, form.customer, fieldTips.customer);
@@ -1178,14 +1228,22 @@ export function OrderEditorPage() {
 
         <div className="bottom-bar">
           <div className="bottom-bar__hint">{hint}</div>
-          <button className="primary-button btn-action-primary" type="button" onClick={handleGenerate}>
-            生成销货单
+          <button className="primary-button btn-action-primary" type="button" onClick={handleGenerate} disabled={isGenerating}>
+            {isGenerating ? "正在生成..." : "生成销货单"}
           </button>
         </div>
       </div>
     </main>
   );
 }
+
+
+
+
+
+
+
+
 
 
 

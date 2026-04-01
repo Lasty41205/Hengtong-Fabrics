@@ -3,6 +3,8 @@ import { CustomerRecord, LocalBusinessDatabase, OrderForm } from "../types";
 import {
   createCustomer,
   deleteCustomerById,
+  findCustomerByNameExact,
+  getCustomerById,
   importCustomers,
   listCustomers,
   updateCustomer
@@ -151,10 +153,9 @@ export async function syncOrderCustomerToCloud(
   }
 
   const localCustomer = findCustomerRecord(database, customerName);
-  const cloudCustomers = await listCustomers();
   const existingCloudCustomer =
-    cloudCustomers.find((customer) => localCustomer?.id && customer.id === localCustomer.id) ||
-    cloudCustomers.find((customer) => normalizeCustomerKey(customer.name) === normalizeCustomerKey(customerName));
+    (localCustomer?.id ? await getCustomerById(localCustomer.id) : null) ||
+    (await findCustomerByNameExact(customerName));
 
   const shouldOverwriteExisting = options?.overwriteExisting ?? false;
   const nextCustomer: CustomerRecord = existingCloudCustomer
@@ -182,22 +183,21 @@ export async function syncOrderCustomerToCloud(
         updatedAt: new Date().toISOString()
       };
 
-  if (existingCloudCustomer) {
-    await updateCustomer(nextCustomer);
-  } else {
-    await createCustomer(nextCustomer);
-  }
+  const savedCustomer = existingCloudCustomer
+    ? await updateCustomer(nextCustomer)
+    : await createCustomer(nextCustomer);
 
-  const [nextCustomers, nextCustomerPrices, nextDefaultPrices] = await Promise.all([
-    listCustomers(),
-    listCustomerPriceGroups(),
-    listDefaultPrices()
-  ]);
+  const filteredCustomers = database.customers.filter(
+    (customer) => customer.id !== savedCustomer.id && normalizeCustomerKey(customer.name) !== normalizeCustomerKey(savedCustomer.name)
+  );
+  const nextCustomers = [...filteredCustomers, savedCustomer].sort((left, right) =>
+    left.name.localeCompare(right.name, "zh-Hans-CN", { sensitivity: "base" })
+  );
   const nextDatabase = saveBusinessDatabase(
     mergeCloudTables(database, {
       customers: nextCustomers,
-      customerPrices: nextCustomerPrices,
-      defaultPrices: nextDefaultPrices
+      customerPrices: database.customerPrices,
+      defaultPrices: database.defaultPrices
     })
   );
 
@@ -207,3 +207,5 @@ export async function syncOrderCustomerToCloud(
     changed: true
   };
 }
+
+

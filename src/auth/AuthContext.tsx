@@ -23,6 +23,7 @@ type AuthContextValue = {
   authMessage: string;
   isConfigured: boolean;
   signIn: (email: string, password: string) => Promise<void>;
+  signInWithAccountId: (accountId: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 };
@@ -36,6 +37,14 @@ type ProfileRow = {
   role: UserRole;
   is_active: boolean;
   created_at: string;
+};
+
+type StaffLoginResponse = {
+  session?: {
+    access_token: string;
+    refresh_token: string;
+  };
+  error?: string;
 };
 
 function mapProfile(row: ProfileRow): AppProfile {
@@ -54,7 +63,7 @@ function normalizeAuthError(error: AuthError | Error | null) {
   const message = error.message || "";
 
   if (message.includes("Invalid login credentials")) {
-    return "邮箱或密码不正确。";
+    return "账号或密码不正确。";
   }
 
   if (message.includes("Email not confirmed")) {
@@ -77,6 +86,28 @@ async function fetchProfile(userId: string) {
   }
 
   return data ? mapProfile(data) : null;
+}
+
+async function applySignedInSession(nextSession: Session | null) {
+  const client = requireSupabaseClient();
+
+  if (!nextSession?.user) {
+    throw new Error("登录失败，请稍后再试。");
+  }
+
+  const nextProfile = await fetchProfile(nextSession.user.id);
+
+  if (!nextProfile) {
+    await client.auth.signOut();
+    throw new Error("账号资料不存在，请联系管理员。");
+  }
+
+  if (!nextProfile.isActive) {
+    await client.auth.signOut();
+    throw new Error("该账号已被停用，请联系管理员。");
+  }
+
+  return nextProfile;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -186,18 +217,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           throw new Error(normalizeAuthError(error));
         }
 
-        const nextProfile = data.user ? await fetchProfile(data.user.id) : null;
+        const nextProfile = await applySignedInSession(data.session);
+        setSession(data.session);
+        setProfile(nextProfile);
+      },
+      signInWithAccountId: async (accountId: string, password: string) => {
+        const client = requireSupabaseClient();
+        setAuthMessage("");
 
-        if (!nextProfile) {
-          await client.auth.signOut();
-          throw new Error("账号资料不存在，请联系管理员。");
+        const response = await fetch("/api/staff-login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json"
+          },
+          body: JSON.stringify({
+            accountId: accountId.trim(),
+            password
+          })
+        });
+
+        const payload = (await response.json().catch(() => ({}))) as StaffLoginResponse;
+
+        if (!response.ok || !payload.session?.access_token || !payload.session?.refresh_token) {
+          throw new Error(payload.error || "登录失败，请稍后再试。");
         }
 
-        if (!nextProfile.isActive) {
-          await client.auth.signOut();
-          throw new Error("该账号已被停用，请联系管理员。");
+        const { data, error } = await client.auth.setSession({
+          access_token: payload.session.access_token,
+          refresh_token: payload.session.refresh_token
+        });
+
+        if (error) {
+          throw new Error(normalizeAuthError(error));
         }
 
+        const nextProfile = await applySignedInSession(data.session);
         setSession(data.session);
         setProfile(nextProfile);
       },

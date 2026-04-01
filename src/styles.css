@@ -629,6 +629,19 @@ button:disabled {
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
 }
 
+.preview-sheet--history-detail .sheet-meta > div:first-child strong {
+  font-size: 32px;
+}
+
+.preview-sheet--history-detail .sheet-footer__block--total strong {
+  font-size: 38px;
+}
+
+.preview-sheet--history-detail .sheet-footer__block--address strong,
+.preview-sheet--history-detail .sheet-footer__block--logistics strong {
+  font-size: 30px;
+}
+
 .preview-action-layer {
   position: fixed;
   inset: 0;
@@ -797,7 +810,7 @@ button:disabled {
 .sheet-footer--simple {
   margin-top: 14px;
   display: grid;
-  grid-template-columns: 1.35fr 1.15fr 0.72fr;
+  grid-template-columns: 1.15fr 1.35fr 1fr 0.85fr;
   gap: 14px;
   align-items: stretch;
 }
@@ -815,6 +828,12 @@ button:disabled {
   border-color: #d2dbe6;
 }
 
+.sheet-footer__block--address {
+  padding: 16px 18px;
+  background: #f8fafc;
+  border-color: #d2dbe6;
+}
+
 .sheet-footer__block--total {
   padding: 16px 18px;
   background: #f8fafc;
@@ -826,6 +845,7 @@ button:disabled {
 }
 
 .sheet-footer__block--logistics span,
+.sheet-footer__block--address span,
 .sheet-footer__block--total span {
   font-size: 14px;
   font-weight: 700;
@@ -836,8 +856,9 @@ button:disabled {
   font-size: 11px;
 }
 
-.sheet-footer__block--logistics strong {
-  font-size: 32px;
+.sheet-footer__block--logistics strong,
+.sheet-footer__block--address strong {
+  font-size: 28px;
   font-weight: 700;
   line-height: 1.16;
   color: #111827;
@@ -924,6 +945,10 @@ button:disabled {
     flex-direction: column;
   }
 
+  .sheet-footer--simple {
+    grid-template-columns: 1fr;
+  }
+
   .items-header {
     display: none;
   }
@@ -996,6 +1021,13 @@ button:disabled {
   .sheet-meta--focus strong,
   .sheet-footer--focus strong {
     font-size: 18px;
+  }
+
+  .preview-sheet--history-detail .sheet-meta > div:first-child strong,
+  .preview-sheet--history-detail .sheet-footer__block--total strong,
+  .preview-sheet--history-detail .sheet-footer__block--address strong,
+  .preview-sheet--history-detail .sheet-footer__block--logistics strong {
+    font-size: 22px;
   }
 
   .sheet-footer--simple {
@@ -2063,6 +2095,10 @@ button:disabled {
 
 .billing-card-actions {
   margin-top: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .billing-card-actions .delete-button--table {
@@ -2428,3 +2464,5 @@ button:disabled {
     width: 100%;
   }
 }
+
+

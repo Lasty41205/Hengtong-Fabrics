@@ -69,6 +69,8 @@ export function BillingPage() {
   const [activeCustomerName, setActiveCustomerName] = useState("");
   const [draftRecord, setDraftRecord] = useState(createDraftRecord("manual_payment"));
   const [isCreatingCustomer, setIsCreatingCustomer] = useState(false);
+  const [isSubmittingDraft, setIsSubmittingDraft] = useState(false);
+  const [savingRecordId, setSavingRecordId] = useState("");
   const [notice, setNotice] = useState("这里显示的是 Supabase 云端账单，余额会根据共享流水自动重算。");
 
   const refreshRecords = async (message: string) => {
@@ -133,7 +135,7 @@ export function BillingPage() {
     return customerRecords.filter((record) => includesKeyword(buildBillingRecordSearchText(record), detailSearchKeyword));
   }, [activeCustomerName, detailSearchKeyword, records]);
 
-  const showDetailPage = Boolean(activeSummary) || isCreatingCustomer;
+  const showDetailPage = Boolean(activeSummary) || isCreatingCustomer || isSubmittingDraft;
 
   const handleSelectCustomer = (customerName: string) => {
     setActiveCustomerName(customerName);
@@ -175,6 +177,8 @@ export function BillingPage() {
   };
 
   const persistRecord = async (recordId: string) => {
+    if (savingRecordId === recordId) return;
+
     const record = records.find((item) => item.id === recordId);
     if (!record) return;
 
@@ -182,6 +186,8 @@ export function BillingPage() {
     if (record.type === "manual_payment" && !record.paymentMethod) return;
 
     try {
+      setSavingRecordId(recordId);
+      setNotice(`正在保存 ${record.customerName} 的流水修改...`);
       await updateBillingEntry(record.id, {
         id: record.id,
         customerName: record.customerName,
@@ -196,10 +202,17 @@ export function BillingPage() {
       await refreshRecords(`已更新账单流水：${record.customerName}`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "账单更新失败，请稍后再试。");
+    } finally {
+      setSavingRecordId("");
     }
   };
 
   const handleDraftSubmit = async () => {
+    if (isSubmittingDraft) {
+      setNotice("正在保存当前流水，请勿重复点击。");
+      return;
+    }
+
     const customerName = (activeCustomerName || draftRecord.customerName).trim();
 
     if (!customerName || !draftRecord.amount.trim()) {
@@ -212,23 +225,31 @@ export function BillingPage() {
       return;
     }
 
+    const draftType = draftRecord.type;
+    const draftMode = isCreatingCustomer;
+
     try {
+      setIsSubmittingDraft(true);
+      setNotice(draftMode ? "正在保存第一笔欠账..." : "正在保存当前流水...");
+
       await createBillingEntry({
         customerName,
-        type: draftRecord.type,
+        type: draftType,
         dateTime: toIsoDateTime(draftRecord.dateTime),
         amount: draftRecord.amount,
         note: draftRecord.note,
-        paymentMethod: draftRecord.type === "manual_payment" ? draftRecord.paymentMethod : ""
+        paymentMethod: draftType === "manual_payment" ? draftRecord.paymentMethod : ""
       });
 
-      setDraftRecord(createDraftRecord(isCreatingCustomer ? "manual_add" : draftRecord.type));
+      await refreshRecords(`已保存${draftType === "manual_payment" ? "已支付" : "记账"}流水。`);
+      setDraftRecord(createDraftRecord(draftMode ? "manual_add" : draftType));
       setActiveCustomerName(customerName);
       setIsCreatingCustomer(false);
       setDetailSearchKeyword("");
-      await refreshRecords(`已保存${draftRecord.type === "manual_payment" ? "已支付" : "记账"}流水。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "账单保存失败，请稍后再试。");
+    } finally {
+      setIsSubmittingDraft(false);
     }
   };
 
@@ -486,8 +507,8 @@ export function BillingPage() {
             </div>
 
             <div className="action-row action-row--tight">
-              <button className="primary-button btn-action-primary" type="button" onClick={handleDraftSubmit}>
-                {isCreatingCustomer ? "保存第一笔欠账" : "保存当前流水"}
+              <button className="primary-button btn-action-primary" type="button" onClick={handleDraftSubmit} disabled={isSubmittingDraft}>
+                {isSubmittingDraft ? "正在保存..." : isCreatingCustomer ? "保存第一笔欠账" : "保存当前流水"}
               </button>
             </div>
 
@@ -569,6 +590,7 @@ export function BillingPage() {
                       ) : null}
 
                       <div className="billing-card-actions">
+                        {savingRecordId === record.id ? <span className="ghost-chip">正在保存...</span> : null}
                         <button className="delete-button delete-button--table" type="button" onClick={() => void handleDeleteRecord(record.id)}>
                           删除
                         </button>
@@ -588,4 +610,9 @@ export function BillingPage() {
     </main>
   );
 }
+
+
+
+
+
 

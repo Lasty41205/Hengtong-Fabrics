@@ -160,6 +160,44 @@ export async function listCustomers() {
   return (data ?? []).map(mapRowToCustomer);
 }
 
+export async function getCustomerById(customerId: string) {
+  const safeCustomerId = normalizeText(customerId);
+  if (!safeCustomerId) return null;
+
+  const client = requireSupabaseClient();
+  const { data, error } = await client
+    .from("customers")
+    .select(customerSelect)
+    .eq("id", safeCustomerId)
+    .maybeSingle<CustomerRow>();
+
+  if (error) {
+    throw new Error(normalizeCustomerError(error));
+  }
+
+  return data ? mapRowToCustomer(data) : null;
+}
+
+export async function findCustomerByNameExact(customerName: string) {
+  const safeCustomerName = normalizeText(customerName);
+  if (!safeCustomerName) return null;
+
+  const client = requireSupabaseClient();
+  const { data, error } = await client
+    .from("customers")
+    .select(customerSelect)
+    .ilike("name", safeCustomerName)
+    .limit(20)
+    .returns<CustomerRow[]>();
+
+  if (error) {
+    throw new Error(normalizeCustomerError(error));
+  }
+
+  const matchedRow = (data ?? []).find((row) => normalizeCustomerKey(row.name) === normalizeCustomerKey(safeCustomerName));
+  return matchedRow ? mapRowToCustomer(matchedRow) : null;
+}
+
 export async function listCustomerPage(options: CustomerPageOptions) {
   const client = requireSupabaseClient();
   const page = Math.max(1, options.page);
@@ -264,3 +302,4 @@ export async function importCustomers(customers: CustomerRecord[]) {
 
   return listCustomers();
 }
+

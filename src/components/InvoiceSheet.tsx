@@ -126,6 +126,10 @@ export function InvoiceSheet({ order, rows, className = "", dateText }: InvoiceS
           <span>货运方式</span>
           <strong>{order.logistics || "待填写"}</strong>
         </div>
+        <div className="sheet-footer__block sheet-footer__block--address">
+          <span>收货地址</span>
+          <strong>{order.address || "待填写"}</strong>
+        </div>
         {!order.billingSummary?.includeInLedger ? (
           <div className="sheet-footer__block sheet-footer__block--total">
             <span>合计金额</span>
@@ -162,3 +166,4 @@ export function InvoiceSheet({ order, rows, className = "", dateText }: InvoiceS
     </div>
   );
 }
+

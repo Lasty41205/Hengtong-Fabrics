@@ -1,35 +1,37 @@
-import { requireSupabaseClient } from "../lib/supabase";
-
 export type LoginAccountOption = {
   id: string;
   displayName: string;
-  email: string;
 };
 
-type LoginAccountRow = {
-  id: string;
-  display_name: string | null;
-  email: string | null;
+type LoginAccountResponse = {
+  accounts?: Array<{
+    id: string;
+    displayName: string;
+  }>;
+  error?: string;
 };
 
 export async function listActiveLoginAccounts() {
-  const client = requireSupabaseClient();
-  const { data, error } = await client.rpc("list_active_login_accounts");
+  const response = await fetch("/api/login-accounts", {
+    method: "GET",
+    headers: {
+      Accept: "application/json"
+    }
+  });
 
-  if (error) {
-    throw new Error("店员列表读取失败，请确认 SQL 已重新执行。");
+  const payload = (await response.json().catch(() => ({}))) as LoginAccountResponse;
+
+  if (!response.ok) {
+    throw new Error(payload.error || "店员列表读取失败，请稍后再试。");
   }
 
-  const rows = Array.isArray(data) ? (data as LoginAccountRow[]) : [];
+  const accounts = Array.isArray(payload.accounts) ? payload.accounts : [];
 
-  return rows
-    .map((row: LoginAccountRow) => ({
-      id: row.id,
-      displayName: row.display_name?.trim() || "",
-      email: row.email?.trim() || ""
+  return accounts
+    .map((row) => ({
+      id: row.id?.trim() || "",
+      displayName: row.displayName?.trim() || ""
     }))
-    .filter((row: LoginAccountOption) => row.id && row.displayName && row.email)
-    .sort((left: LoginAccountOption, right: LoginAccountOption) =>
-      left.displayName.localeCompare(right.displayName, "zh-Hans-CN", { sensitivity: "base" })
-    );
+    .filter((row) => row.id && row.displayName)
+    .sort((left, right) => left.displayName.localeCompare(right.displayName, "zh-Hans-CN", { sensitivity: "base" }));
 }

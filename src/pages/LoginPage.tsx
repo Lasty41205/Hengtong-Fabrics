@@ -7,12 +7,31 @@ type LoginRouteState = {
   from?: {
     pathname?: string;
   };
+  forceEditorRedirect?: boolean;
 };
+
+const LAST_LOGIN_ACCOUNT_KEY = "last-login-account-id";
+
+function loadLastLoginAccountId() {
+  try {
+    return localStorage.getItem(LAST_LOGIN_ACCOUNT_KEY)?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveLastLoginAccountId(accountId: string) {
+  try {
+    localStorage.setItem(LAST_LOGIN_ACCOUNT_KEY, accountId.trim());
+  } catch {
+    // 忽略本地缓存失败，不影响登录主流程
+  }
+}
 
 export function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { signIn, authMessage, isConfigured } = useAuth();
+  const { signInWithAccountId, authMessage, isConfigured } = useAuth();
   const [accounts, setAccounts] = useState<LoginAccountOption[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [password, setPassword] = useState("");
@@ -21,7 +40,10 @@ export function LoginPage() {
   const [loadingAccounts, setLoadingAccounts] = useState(false);
 
   const routeState = location.state as LoginRouteState | null;
-  const redirectTo = useMemo(() => routeState?.from?.pathname || "/", [routeState?.from?.pathname]);
+  const redirectTo = useMemo(
+    () => (routeState?.forceEditorRedirect ? "/" : routeState?.from?.pathname || "/"),
+    [routeState?.forceEditorRedirect, routeState?.from?.pathname]
+  );
   const selectedAccount = useMemo(
     () => accounts.find((item) => item.id === selectedAccountId),
     [accounts, selectedAccountId]
@@ -37,8 +59,10 @@ export function LoginPage() {
         setLoadingAccounts(true);
         const nextAccounts = await listActiveLoginAccounts();
         if (!active) return;
+        const lastAccountId = loadLastLoginAccountId();
+        const matchedLastAccount = nextAccounts.find((item) => item.id === lastAccountId);
         setAccounts(nextAccounts);
-        setSelectedAccountId((current) => current || nextAccounts[0]?.id || "");
+        setSelectedAccountId((current) => current || matchedLastAccount?.id || nextAccounts[0]?.id || "");
       } catch (error) {
         if (!active) return;
         setErrorText(error instanceof Error ? error.message : "店员列表读取失败，请稍后再试。");
@@ -72,7 +96,8 @@ export function LoginPage() {
     try {
       setSubmitting(true);
       setErrorText("");
-      await signIn(selectedAccount.email, password);
+      await signInWithAccountId(selectedAccount.id, password);
+      saveLastLoginAccountId(selectedAccount.id);
       navigate(redirectTo, { replace: true });
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : "登录失败，请稍后再试。");
@@ -100,8 +125,8 @@ export function LoginPage() {
             <div className="auth-tip-card">
               <strong>先配置环境变量</strong>
               <p>
-                在项目根目录创建 `.env.local`，填入 `VITE_SUPABASE_URL` 和
-                `VITE_SUPABASE_PUBLISHABLE_KEY`，然后重新运行 `npm run dev`。
+                在项目根目录创建 `.env.local`，填入 `VITE_SUPABASE_URL`、`VITE_SUPABASE_PUBLISHABLE_KEY` 和
+                `SUPABASE_SERVICE_ROLE_KEY`，然后重新运行 `npm run dev`。
               </p>
             </div>
           ) : null}
@@ -111,7 +136,7 @@ export function LoginPage() {
           {isConfigured && !loadingAccounts && accounts.length === 0 ? (
             <div className="auth-tip-card">
               <strong>还没有可登录店员</strong>
-              <p>请先确认 `profiles.display_name` 已填写，并重新执行本轮 SQL 里的登录账号函数。</p>
+              <p>请先确认 `profiles.display_name` 已填写，并且已配置服务端登录接口环境变量。</p>
             </div>
           ) : null}
 

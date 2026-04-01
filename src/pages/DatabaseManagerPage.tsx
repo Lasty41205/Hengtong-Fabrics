@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import seedDatabase from "../data/localDbSeed.json";
 import { useAuth } from "../auth/AuthContext";
 import { includesKeyword } from "../components/HighlightedText";
 import { TopBar } from "../components/TopBar";
-import { downloadBusinessDatabase, loadBusinessDatabase, sanitizeDatabase } from "../localDb";
+import { loadBusinessDatabase } from "../localDb";
 import { formatHistoryTime } from "../historyStore";
 import { importLocalCustomersToCloud } from "../services/businessDatabase";
 import {
@@ -237,10 +236,6 @@ export function DatabaseManagerPage() {
   const navigate = useNavigate();
   const { profile } = useAuth();
   const initialDatabase = useMemo<LocalBusinessDatabase>(() => loadBusinessDatabase(), []);
-  const seedLocalDatabase = useMemo(
-    () => sanitizeDatabase(seedDatabase as LocalBusinessDatabase),
-    []
-  );
   const [activeTable, setActiveTable] = useState<ActiveTable>("customers");
   const [notice, setNotice] = useState("customers / 客户价 / 默认价现在都会同步到 Supabase。");
   const [customerSource, setCustomerSource] = useState<CustomerDataSource>("local");
@@ -424,42 +419,6 @@ export function DatabaseManagerPage() {
     setDefaultPriceTotalCount(result.totalCount);
     setDefaultPricePage(result.page);
     return result;
-  };
-
-  const handleExport = () => {
-    downloadBusinessDatabase(loadBusinessDatabase());
-    setNotice("已导出当前本地兼容 JSON 快照。分页页签未加载到的云端数据不会包含在这份导出里。");
-  };
-
-  const handleResetDraft = () => {
-    if (activeTable === "customers") {
-      const fallbackPage = paginateRows(seedLocalDatabase.customers, 1, PAGE_SIZE);
-      setCustomerSearchKeyword("");
-      setCustomerPage(1);
-      setDraftCustomerRows(cloneRows(fallbackPage.records));
-      setNotice("已恢复客户信息表示例草稿。只有点击保存，才会覆盖云端当前页对应记录。");
-      return;
-    }
-
-    if (activeTable === "customerPrices") {
-      setCustomerPriceSearchName("");
-      setSavedCustomerPriceGroup(null);
-      setDraftCustomerPriceGroup(null);
-      setNotice("已清空客户专属价格页，重新搜索客户后再编辑。");
-      return;
-    }
-
-    const fallbackPage = paginateRows(
-      [...seedLocalDatabase.defaultPrices].sort(
-        (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
-      ),
-      1,
-      PAGE_SIZE
-    );
-    setDefaultPriceSearchKeyword("");
-    setDefaultPricePage(1);
-    setDraftDefaultPriceRows(cloneRows(fallbackPage.records));
-    setNotice("已恢复默认单价表示例草稿。只有点击保存，才会覆盖云端当前页对应记录。");
   };
 
   const handleSaveCustomers = async () => {
@@ -816,7 +775,7 @@ export function DatabaseManagerPage() {
           <div className="hero-card__heading hero-card__heading--stack">
             <div>
               <h2>共享业务数据库</h2>
-              <p>当前 customers、客户专属价、默认单价都改为 Supabase 云端共享，多个店员会看到同一套数据。</p>
+              <p>当前 customers、客户专属价、默认单价都改为 Supabase 云端共享。数据库页现在按“当前页”或“当前客户价格组”保存。</p>
             </div>
             <div className="action-row action-row--tight">
               <button className="secondary-button btn-nav-back" type="button" onClick={handleBackToEditor}>
@@ -828,12 +787,7 @@ export function DatabaseManagerPage() {
               <button className="ghost-button btn-nav-billing" type="button" onClick={() => navigate("/billing")}>
                 账单
               </button>
-              <button className="ghost-button btn-utility" type="button" onClick={handleExport}>
-                导出 JSON
-              </button>
-              <button className="ghost-button btn-danger-soft" type="button" onClick={handleResetDraft}>
-                恢复示例库
-              </button>
+
             </div>
           </div>
 
@@ -1115,7 +1069,7 @@ export function DatabaseManagerPage() {
               返回编辑页
             </button>
             <button className="primary-button btn-action-primary database-save-button" type="button" onClick={() => void handleSave()} disabled={isSaving || activeTableLoading}>
-              {isSaving ? "保存中..." : activeTable === "customerPrices" ? "保存当前客户价格组" : "保存当前页"}
+              {isSaving ? "保存中..." : activeTable === "customerPrices" ? "保存这位客户的价格组" : "保存当前页改动"}
             </button>
           </div>
         </div>
@@ -1123,3 +1077,6 @@ export function DatabaseManagerPage() {
     </main>
   );
 }
+
+
+
