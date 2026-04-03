@@ -24,6 +24,10 @@ type InvoiceSheetProps = {
 
 export function buildInvoiceSheetRows(order: OrderForm, fixedRows = FIXED_ROWS): SheetRow[] {
   const items = order.items ?? [];
+  if (items.length > fixedRows) {
+    return items;
+  }
+
   const blanks = Array.from({ length: Math.max(0, fixedRows - items.length) }).map((_, index) => ({
     id: `blank-${index}`,
     nameSpec: "",
@@ -166,4 +170,5 @@ export function InvoiceSheet({ order, rows, className = "", dateText }: InvoiceS
     </div>
   );
 }
+
 

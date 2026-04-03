@@ -62,6 +62,10 @@ async function waitForExportReady(target: HTMLElement) {
   await new Promise<void>((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())));
 }
 
+function buildExportFileName(order: OrderForm) {
+  return `${order.customer || "未命名客户"}-${exportDateText}.png`;
+}
+
 export function PreviewPage() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -72,6 +76,7 @@ export function PreviewPage() {
   const [hint, setHint] = useState("长按图片可复制或下载。当前不会把图片长期保存到数据库。");
   const [isPreparing, setIsPreparing] = useState(true);
   const [exportFailed, setExportFailed] = useState(false);
+  const [isSharing, setIsSharing] = useState(false);
 
   const order = useMemo(() => loadPreviewOrder(location.state), [location.state]);
   const rows = useMemo(() => (order ? buildInvoiceSheetRows(order) : []), [order]);
@@ -132,7 +137,7 @@ export function PreviewPage() {
 
         if (!cancelled) {
           setImageUrl(nextImageUrl);
-          setHint("长按图片可复制或下载。当前不会把图片长期保存到数据库。");
+          setHint("可下载、复制或分享。当前不会把图片长期保存到数据库。");
         }
       } catch (error) {
         console.error(error);
@@ -191,7 +196,7 @@ export function PreviewPage() {
 
     const link = document.createElement("a");
     link.href = imageUrl;
-    link.download = `${order.customer || "未命名客户"}-${exportDateText}.png`;
+    link.download = buildExportFileName(order);
     link.click();
     setMenuOpen(false);
     setHint("PNG 图片已开始下载。数据库里不会保存这张图片。");
@@ -224,6 +229,49 @@ export function PreviewPage() {
     }
   };
 
+  const handleShareImage = async () => {
+    if (!order || !imageUrl || exportFailed) {
+      setHint("当前还没有可分享的图片，请先等待图片生成完成。若系统分享不可用，可先下载后再用微信发送。");
+      return;
+    }
+
+    if (!("share" in navigator) || typeof navigator.share !== "function") {
+      setHint("当前浏览器不支持系统分享，请先下载图片后再用微信发送。");
+      setMenuOpen(true);
+      return;
+    }
+
+    try {
+      setIsSharing(true);
+      const response = await fetch(imageUrl);
+      const blob = await response.blob();
+      const file = new File([blob], buildExportFileName(order), { type: blob.type || "image/png" });
+
+      if (typeof navigator.canShare === "function" && !navigator.canShare({ files: [file] })) {
+        setHint("当前浏览器不能直接分享图片文件，请先下载后再用微信发送。");
+        setMenuOpen(true);
+        return;
+      }
+
+      await navigator.share({
+        title: `${order.customer || "客户"} 销货单`,
+        text: `${order.customer || "客户"} 销货单`,
+        files: [file]
+      });
+      setHint("系统分享面板已打开，可继续选择微信或其他应用。");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+
+      console.error(error);
+      setHint("当前浏览器无法直接分享图片，请先下载后再用微信发送。");
+      setMenuOpen(true);
+    } finally {
+      setIsSharing(false);
+    }
+  };
+
   if (!order) {
     return (
       <main className="page-shell page-shell--preview">
@@ -232,7 +280,7 @@ export function PreviewPage() {
           <section className="empty-card empty-card--preview">
             <h2>暂无预览数据</h2>
             <p>请先返回订单编辑页生成一份有效销货单。</p>
-            <button className="secondary-button btn-nav-back" type="button" onClick={() => navigate("/")}>
+            <button className="secondary-button btn-nav-back" type="button" onClick={() => navigate("/", { state: { focusTop: true } })}>
               返回编辑页
             </button>
           </section>
@@ -249,9 +297,19 @@ export function PreviewPage() {
         <section className="preview-card preview-card--paper preview-card--viewer">
           <div className="preview-card__head preview-card__head--viewer">
             <p>{hint}</p>
-            <button className="ghost-button btn-nav-back" type="button" onClick={() => navigate("/")}>
-              返回编辑
-            </button>
+            <div className="preview-primary-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => void handleShareImage()}
+                disabled={!imageUrl || exportFailed || isPreparing || isSharing}
+              >
+                {isSharing ? "正在分享..." : "分享"}
+              </button>
+              <button className="ghost-button btn-nav-back" type="button" onClick={() => navigate("/", { state: { focusTop: true } })}>
+                返回编辑
+              </button>
+            </div>
           </div>
 
           <div className="preview-wrapper preview-wrapper--viewer">

@@ -574,7 +574,7 @@ export function DatabaseManagerPage() {
       if (!confirmed) return;
     }
 
-    navigate("/");
+    navigate("/", { state: { focusTop: true } });
   };
 
   const handleCustomerChange = (

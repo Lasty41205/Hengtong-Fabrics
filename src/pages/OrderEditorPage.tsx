@@ -72,6 +72,7 @@ type EditorSnapshot = {
 
 type EditorRouteState = {
   historyRecord?: HistoryRecord;
+  focusTop?: boolean;
 } | null;
 
 function normalizeSnapshotForm(value: Partial<OrderForm> | undefined): OrderForm {
@@ -247,10 +248,13 @@ function hasCustomerPriceGroupChanged(
 export function OrderEditorPage() {
   const navigate = useNavigate();
   const location = useLocation();
+  const heroSectionRef = useRef<HTMLElement | null>(null);
   const editorSectionRef = useRef<HTMLElement | null>(null);
   const itemsPanelRef = useRef<HTMLDivElement | null>(null);
   const fieldRefs = useRef<Record<string, FocusableElement | null>>({});
   const isGeneratingRef = useRef(false);
+  const ledgerSelectionCustomerKeyRef = useRef("");
+  const ledgerSelectionTouchedRef = useRef(false);
   const routeState = location.state as EditorRouteState;
   const routeHistoryRecord = routeState?.historyRecord;
   const initialDatabase = useMemo<LocalBusinessDatabase>(() => loadBusinessDatabase(), []);
@@ -285,39 +289,45 @@ export function OrderEditorPage() {
   }, [freightSelection.primary]);
   const showFreightSecondary = freightSelection.primary === "物流" || freightSelection.primary === "快递";
   const showFreightCustomInput = freightSelection.customMode !== "none";
+  const currentCustomerNameKey = useMemo(() => form.customer.trim().toUpperCase(), [form.customer]);
   const existingAutoBillingRecord = useMemo<BillingRecord | undefined>(
     () => billingRecords.find((record) => record.type === "auto_add" && record.relatedOrderId === activeHistoryRecordId),
     [activeHistoryRecordId, billingRecords]
+  );
+  const hasCustomerBillingHistory = useMemo(
+    () =>
+      Boolean(currentCustomerNameKey) &&
+      billingRecords.some((record) => record.customerName.trim().toUpperCase() === currentCustomerNameKey),
+    [billingRecords, currentCustomerNameKey]
   );
   const customerHistoricalBalance = useMemo(
     () => calculateCustomerCurrentBalance(billingRecords, form.customer, { excludeRelatedOrderId: activeHistoryRecordId || undefined }),
     [activeHistoryRecordId, billingRecords, form.customer]
   );
-  const shouldShowBillingPrompt = Boolean(existingAutoBillingRecord) || Number(customerHistoricalBalance || 0) !== 0;
+  const shouldShowBillingPrompt = Boolean(form.customer.trim());
+  const showBillingAlertCard = shouldShowBillingPrompt && hasCustomerBillingHistory;
+  const showBillingInlinePrompt = shouldShowBillingPrompt && !hasCustomerBillingHistory;
 
   useEffect(() => {
-    const snapshot: EditorSnapshot = {
-      rawInput,
-      form,
-      hasParsed,
-      freightSelection,
-      hint,
-      editingHistoryRecordId,
-      historyEditMode,
-      persistCustomerDefaults,
-      includeInLedger
-    };
+    if (!currentCustomerNameKey) {
+      ledgerSelectionCustomerKeyRef.current = "";
+      ledgerSelectionTouchedRef.current = false;
+      setIncludeInLedger(false);
+      return;
+    }
 
-    sessionStorage.setItem(EDITOR_STATE_KEY, JSON.stringify(snapshot));
-  }, [editingHistoryRecordId, form, freightSelection, hasParsed, hint, historyEditMode, persistCustomerDefaults, includeInLedger, rawInput]);
+    const customerChanged = ledgerSelectionCustomerKeyRef.current !== currentCustomerNameKey;
+    if (customerChanged) {
+      ledgerSelectionCustomerKeyRef.current = currentCustomerNameKey;
+      ledgerSelectionTouchedRef.current = false;
+      setIncludeInLedger(hasCustomerBillingHistory);
+      return;
+    }
 
-  useEffect(() => {
-    const shouldIncludeCurrentOrder = Boolean(
-      existingAutoBillingRecord &&
-        existingAutoBillingRecord.customerName.trim().toUpperCase() === form.customer.trim().toUpperCase()
-    );
-    setIncludeInLedger(shouldIncludeCurrentOrder);
-  }, [existingAutoBillingRecord, form.customer]);
+    if (!ledgerSelectionTouchedRef.current) {
+      setIncludeInLedger(hasCustomerBillingHistory);
+    }
+  }, [currentCustomerNameKey, hasCustomerBillingHistory]);
 
   useEffect(() => {
     return () => {
@@ -326,6 +336,18 @@ export function OrderEditorPage() {
       }
     };
   }, [pastedImage]);
+
+  useEffect(() => {
+    if (!routeState?.focusTop && !routeHistoryRecord) return;
+
+    const timer = window.setTimeout(() => {
+      heroSectionRef.current?.scrollIntoView({ behavior: "auto", block: "start" });
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [routeHistoryRecord, routeState?.focusTop]);
 
   useEffect(() => {
     let active = true;
@@ -596,6 +618,8 @@ export function OrderEditorPage() {
     setEditingHistoryRecordId("");
     setHistoryEditMode(false);
     setPersistCustomerDefaults(false);
+    ledgerSelectionCustomerKeyRef.current = "";
+    ledgerSelectionTouchedRef.current = false;
     setActiveFieldKey("");
     setPastedImage((current) => {
       if (current?.url) {
@@ -894,10 +918,10 @@ export function OrderEditorPage() {
 
   return (
     <main className="page-shell">
-      <div className="page phone-frame">
+      <div className="page phone-frame phone-frame--editor">
         <TopBar title="订单编辑" rightText={customerSource === "supabase" ? "Phase 3 云端共享" : "Phase 3 本地回退"} />
 
-        <section className="hero-card">
+        <section className="hero-card" ref={heroSectionRef}>
           <div className="hero-card__heading hero-card__heading--stack hero-card__heading--editor-title">
             <div>
               <h2>快速录入报单</h2>
@@ -1081,7 +1105,7 @@ export function OrderEditorPage() {
               </label>
             </div>
 
-            {shouldShowBillingPrompt ? (
+            {showBillingAlertCard ? (
               <div className="billing-alert-card">
                 <div className="billing-alert-card__summary">
                   <strong>历史记账：¥ {customerHistoricalBalance}</strong>
@@ -1089,12 +1113,32 @@ export function OrderEditorPage() {
                     <input
                       type="checkbox"
                       checked={includeInLedger}
-                      onChange={(event) => setIncludeInLedger(event.target.checked)}
+                      onChange={(event) => {
+                        ledgerSelectionTouchedRef.current = true;
+                        setIncludeInLedger(event.target.checked);
+                      }}
                     />
                     <span>是否累计本次账单</span>
                   </label>
                 </div>
-                <p>默认不累计，只有勾选后，本次金额才会写入历史账单余额。</p>
+                <p>检测到这位客户已有账单记录，默认会累计；如仅本次不记账，可手动取消。</p>
+              </div>
+            ) : null}
+
+            {showBillingInlinePrompt ? (
+              <div className="billing-inline-hint">
+                <label className="billing-inline-hint__check">
+                  <input
+                    type="checkbox"
+                    checked={includeInLedger}
+                    onChange={(event) => {
+                      ledgerSelectionTouchedRef.current = true;
+                      setIncludeInLedger(event.target.checked);
+                    }}
+                  />
+                  <span>新建账单</span>
+                </label>
+                <span className="billing-inline-hint__text">当前客户还没有账单记录，本次如需记账可手动勾选。</span>
               </div>
             ) : null}
 
@@ -1125,7 +1169,25 @@ export function OrderEditorPage() {
 
                   return (
                     <div className="item-row item-row--compact" key={item.id}>
-                      <div className="item-index">{index + 1}</div>
+                      <div className="item-index item-index--desktop">{index + 1}</div>
+
+                      <div className="item-mobile-head">
+                        <span className="item-mobile-head__label">名称及规格</span>
+                        <div className="item-mobile-head__aside">
+                          <span className="item-index item-index--inline">#{index + 1}</span>
+                          <button
+                            className="delete-button delete-button--icon"
+                            type="button"
+                            aria-label="删除商品行"
+                            title="删除"
+                            onClick={() => handleDeleteItem(item.id)}
+                          >
+                            <span className="delete-button__icon" aria-hidden="true">
+                              ×
+                            </span>
+                          </button>
+                        </div>
+                      </div>
 
                       <div className="item-cell item-cell--name">
                         <input
@@ -1142,7 +1204,8 @@ export function OrderEditorPage() {
                         {nameIssue ? <span className="table-error">{nameIssue.message}</span> : null}
                       </div>
 
-                      <div className="item-cell">
+                      <div className="item-cell item-cell--quantity">
+                        <span className="item-cell__mobile-label">数量</span>
                         <input
                           ref={registerFieldRef(`item-${item.id}-quantity`)}
                           className={`table-input ${quantityIssue ? "is-invalid" : ""} ${
@@ -1157,7 +1220,8 @@ export function OrderEditorPage() {
                         {quantityIssue ? <span className="table-error">{quantityIssue.message}</span> : null}
                       </div>
 
-                      <div className="item-cell">
+                      <div className="item-cell item-cell--price">
+                        <span className="item-cell__mobile-label">单价</span>
                         <input
                           ref={registerFieldRef(`item-${item.id}-unitPrice`)}
                           className={`table-input ${priceIssue ? "is-invalid" : ""} ${
@@ -1173,7 +1237,8 @@ export function OrderEditorPage() {
                         {priceIssue ? <span className="table-error">{priceIssue.message}</span> : null}
                       </div>
 
-                      <div className="item-cell">
+                      <div className="item-cell item-cell--amount">
+                        <span className="item-cell__mobile-label">金额</span>
                         <input
                           ref={registerFieldRef(`item-${item.id}-amount`)}
                           className={`table-input table-input--readonly ${amountIssue ? "is-invalid" : ""} ${
@@ -1236,34 +1301,3 @@ export function OrderEditorPage() {
     </main>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

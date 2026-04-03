@@ -213,7 +213,7 @@ export function HistoryPage() {
               <p>{notice}</p>
             </div>
             <div className="action-row action-row--tight">
-              <button className="secondary-button btn-nav-back" type="button" onClick={() => navigate("/")}>
+              <button className="secondary-button btn-nav-back" type="button" onClick={() => navigate("/", { state: { focusTop: true } })}>
                 返回编辑页
               </button>
               <button className="ghost-button btn-nav-database" type="button" onClick={() => navigate("/database")}>
@@ -333,7 +333,7 @@ export function HistoryPage() {
                             <button
                               className="primary-button btn-action-primary"
                               type="button"
-                              onClick={() => navigate("/", { state: { historyRecord: detailRecord } })}
+                              onClick={() => navigate("/", { state: { historyRecord: detailRecord, focusTop: true } })}
                             >
                               继续编辑并重生成
                             </button>

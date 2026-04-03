@@ -306,7 +306,7 @@ export function BillingPage() {
                   返回总览
                 </button>
               ) : (
-                <button className="secondary-button btn-nav-back" type="button" onClick={() => navigate("/")}>
+                <button className="secondary-button btn-nav-back" type="button" onClick={() => navigate("/", { state: { focusTop: true } })}>
                   返回编辑页
                 </button>
               )}
