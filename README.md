@@ -23,6 +23,11 @@ VITE_SUPABASE_PUBLISHABLE_KEY=your-supabase-anon-key
 SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
 ```
 
+注意：
+- 真实环境变量只放在本地 `.env.local`，不要提交到 GitHub
+- `SUPABASE_SERVICE_ROLE_KEY` 只能放服务端环境变量，不能暴露到前端代码里
+- 公开仓库中只保留 `.env.example` 这类占位模板
+
 3. 启动开发环境
 ```bash
 npm run dev
@@ -62,7 +67,12 @@ SUPABASE_SERVICE_ROLE_KEY
 ```
 5. 点击 Deploy
 
-项目根目录已增加 `vercel.json`，用于把前端路由统一回退到 `index.html`，避免刷新 `/login`、`/history` 这类页面时报 404。
+说明：
+- GitHub 仓库不要上传真实 `.env` 或 `.env.local`
+- Vercel 后台手动添加以上 3 个环境变量即可
+- 如果你轮换了 `SUPABASE_SERVICE_ROLE_KEY`，记得同时更新本地 `.env.local` 和 Vercel 项目配置
+
+项目根目录已增加 `vercel.json`，用于让前端路由回退到 `index.html`，同时保留 `/api/*` 继续走 Vercel Function，避免登录接口被前端重写规则拦截。
 
 ## 本轮关键文件
 - [src/lib/supabase.ts](/E:/⭐求职上岸/HTBY_project/src/lib/supabase.ts)
